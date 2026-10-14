@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "chainsniffer",
+  "project_id": "a57d7ddc-7ec3-41b4-b8f9-9bf304afa682"
+}
