@@ -1,0 +1,52 @@
+{
+  "id": "01JBQ4Z8XK3P5R7W9Y1A2B3C4F",
+  "type": "map_kill",
+  "map_id": "f5c0a8f2-6c1d-4f3b-9f1e-2a3b4c5d6e7f",
+  "timestamp": "2026-10-13T18:44:19.000000Z",
+  "payload": {
+    "type": "killmail_update",
+    "solar_system_id": 30000142,
+    "timestamp": "2026-10-13T18:44:19Z",
+    "killmails": [
+      {
+        "kill_time": "2026-10-13T18:44:01Z",
+        "solar_system_id": 30000142,
+        "victim_corp_id": 98000001,
+        "victim_ship_type_id": 670,
+        "victim_ship_name": "Capsule",
+        "total_value": 10000.0,
+        "npc": false
+      },
+      {
+        "killmail_id": "not-a-number",
+        "kill_time": "2026-10-13T18:44:05Z",
+        "solar_system_id": 30000142,
+        "victim_ship_name": "Venture",
+        "total_value": 4200000.0,
+        "npc": false
+      },
+      {
+        "killmail_id": 987654321,
+        "kill_time": "2026-10-13T18:44:11Z",
+        "solar_system_id": 30000142,
+        "victim_char_id": 2112000001,
+        "victim_char_name": "Unlucky Miner",
+        "victim_corp_id": 98111222,
+        "victim_corp_ticker": "MINE",
+        "victim_corp_name": "Rock Botherers",
+        "victim_ship_type_id": 32880,
+        "victim_ship_name": "Venture",
+        "final_blow_char_id": 3019582,
+        "final_blow_char_name": "Sleepless Sentry",
+        "final_blow_corp_id": 1000125,
+        "final_blow_corp_ticker": "SLPR",
+        "final_blow_corp_name": "Sleepers",
+        "final_blow_ship_type_id": 30187,
+        "final_blow_ship_name": "Sleepless Sentinel",
+        "attacker_count": 1,
+        "total_value": 18750000.0,
+        "npc": true
+      }
+    ]
+  }
+}
