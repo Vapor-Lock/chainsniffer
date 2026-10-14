@@ -1,17 +1,254 @@
-// Command chainsniffer relays killmails from a Wanderer map's event stream to a
-// Discord channel.
+// Command chainsniffer relays killmails from one Wanderer map's event stream
+// to one Discord channel.
+//
+// Everything it needs comes from the environment, which internal/config reads
+// and validates; the command itself only wires the packages together, owns the
+// process' signals, and turns what went wrong into an exit status:
+//
+//	0  a clean shutdown on SIGINT or SIGTERM
+//	1  a failure an operator has to look at: a rejected token, a channel the
+//	   bot cannot post to, a map whose stream Wanderer refuses, an unusable
+//	   state directory
+//	2  a configuration the relay refuses to start with, with every bad
+//	   variable named on standard error
+//
+// See the "Structured logging" and "Graceful shutdown" requirements of
+// openspec/changes/add-killmail-relay-bot/specs/relay-runtime/spec.md.
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/Vapor-Lock/chainsniffer/internal/config"
+	"github.com/Vapor-Lock/chainsniffer/internal/discord"
+	"github.com/Vapor-Lock/chainsniffer/internal/killmail"
+	"github.com/Vapor-Lock/chainsniffer/internal/relay"
+	"github.com/Vapor-Lock/chainsniffer/internal/state"
+	"github.com/Vapor-Lock/chainsniffer/internal/universe"
+	"github.com/Vapor-Lock/chainsniffer/internal/wanderer"
 )
 
 // version is stamped into release builds with -ldflags "-X main.version=...".
 var version = "dev"
 
+// The process' exit statuses. A configuration error gets one of its own
+// because it is the failure an operator can always fix from the outside, and
+// because a container that exits 2 on every start is unambiguous.
+const (
+	exitOK      = 0
+	exitFailure = 1
+	exitConfig  = 2
+)
+
+// shutdownGrace is how long a Discord post that is already in flight may keep
+// running after a signal before its context is cancelled too. The relay-runtime
+// spec puts the bound at ten seconds.
+const shutdownGrace = 10 * time.Second
+
 func main() {
-	if _, err := fmt.Fprintf(os.Stdout, "chainsniffer %s\n", version); err != nil {
-		os.Exit(1)
+	os.Exit(run(context.Background(), os.Stderr, os.LookupEnv))
+}
+
+// options are the seams the end-to-end test replaces. They are not reachable
+// from the environment: pointing the relay at another Discord or ESI is a
+// testing affordance, not a setting.
+type options struct {
+	discordBaseURL string
+	esiBaseURL     string
+}
+
+// An option overrides one default in [run].
+type option func(*options)
+
+// withDiscordBaseURL sends the Discord REST calls to another API root.
+func withDiscordBaseURL(url string) option {
+	return func(o *options) { o.discordBaseURL = url }
+}
+
+// withESIBaseURL sends the system-name lookups to another ESI root.
+func withESIBaseURL(url string) option {
+	return func(o *options) { o.esiBaseURL = url }
+}
+
+// run is main with its environment, its output and its lifetime passed in. It
+// returns the process' exit status.
+func run(ctx context.Context, stderr io.Writer, lookup config.LookupFunc, opts ...option) int {
+	cfg, err := config.Load(lookup)
+	if err != nil {
+		// The log level and format are part of what failed to load, so this
+		// one message goes to standard error unformatted.
+		_, _ = fmt.Fprintf(stderr, "chainsniffer: %v\n", err)
+		return exitConfig
 	}
+
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	logger := newLogger(stderr, cfg)
+	// Logging the Config logs its redacted summary: both tokens report
+	// themselves as "[redacted]" through slog.LogValuer.
+	logger.Info("starting chainsniffer", "version", version, "config", cfg)
+
+	return serve(ctx, logger, cfg, o)
+}
+
+// serve runs the relay until a signal, a fatal failure or a cancelled ctx
+// stops it, and reports the exit status that leaves.
+func serve(ctx context.Context, logger *slog.Logger, cfg *config.Config, o options) int {
+	store, err := state.Open(cfg.StateDir, state.WithLogger(logger))
+	if err != nil {
+		logger.Error("the state directory is unusable", "dir", cfg.StateDir, "error", err)
+		return exitFailure
+	}
+	logger.Info("loaded the relay state", "path", store.Path(),
+		"last_event_id", store.LastEventID(), "posted_killmails", len(store.PostedIDs()))
+
+	// A signal stops the stream, but not the post in flight: streamCtx is what
+	// the Wanderer client reads under, while postCtx outlives it by at most
+	// shutdownGrace so that a killmail already on its way to Discord either
+	// lands or is given up on before the process exits.
+	streamCtx, stopSignals := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
+	postCtx, cancelPosts := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelPosts()
+
+	stopped := make(chan struct{})
+	defer close(stopped)
+	go grace(ctx, streamCtx, stopped, cancelPosts, logger)
+
+	poster, err := newPoster(cfg, logger, o)
+	if err != nil {
+		logger.Error("cannot build the Discord client", "error", err)
+		return exitFailure
+	}
+	// The gateway session Startup opens is the relay's one long-lived Discord
+	// connection, so it is closed on every way out of this function.
+	defer func() {
+		if err := poster.Close(); err != nil {
+			logger.Warn("closing the Discord session failed", "error", err)
+		}
+	}()
+
+	if err := poster.Startup(streamCtx); err != nil {
+		return stop(logger, store, streamCtx, fmt.Errorf("the Discord startup check failed: %w", err))
+	}
+
+	relayer, err := relay.New(poster, newResolver(logger, o), store,
+		relay.WithFriendlies(killmail.NewFriendlies(cfg.FriendlyCorpIDs, cfg.FriendlyAllianceIDs)),
+		relay.WithFilters(killmail.Filters{
+			ExcludeNPC:   cfg.ExcludeNPC,
+			MinValue:     cfg.MinValue,
+			FriendlyOnly: cfg.FriendlyOnly,
+			MaxKillAge:   cfg.MaxKillAge,
+		}),
+		relay.WithLogger(logger))
+	if err != nil {
+		logger.Error("cannot build the relay", "error", err)
+		return exitFailure
+	}
+
+	client, err := wanderer.New(cfg.WandererURL, cfg.WandererMap, cfg.WandererToken.Reveal(),
+		wanderer.WithLogger(logger))
+	if err != nil {
+		logger.Error("cannot build the Wanderer client", "error", err)
+		return exitFailure
+	}
+
+	// store.LastEventID is read before every connection attempt, so a
+	// reconnect resumes from the newest event the relay has finished.
+	return stop(logger, store, streamCtx, client.Run(streamCtx, store.LastEventID, relayer.Handler(postCtx)))
+}
+
+// stop reports how the run ended: a shutdown asked for from the outside is a
+// success, anything else is a failure. Either way the state is written one last
+// time, since a killmail posted during the final event is only recorded as
+// posted in memory until it is.
+func stop(logger *slog.Logger, store *state.Store, streamCtx context.Context, err error) int {
+	code := exitFailure
+	switch {
+	case err == nil:
+		// The stream loop only returns for a reason; reaching here means a
+		// future change stopped it cleanly on its own.
+		logger.Info("the Wanderer stream loop finished")
+		code = exitOK
+	case streamCtx.Err() != nil && errors.Is(err, streamCtx.Err()):
+		logger.Info("shutting down", "last_event_id", store.LastEventID())
+		code = exitOK
+	default:
+		logger.Error("the relay stopped", "error", err)
+	}
+
+	if err := store.Save(); err != nil {
+		logger.Error("saving the relay state failed", "path", store.Path(), "error", err)
+		code = exitFailure
+	}
+	return code
+}
+
+// grace cancels the posting context once the stream has been told to stop:
+// at once when the caller cancelled ctx, since then nobody is waiting for the
+// post to land, and after shutdownGrace when a signal arrived, which is the
+// window the in-flight post gets to finish in.
+//
+// It returns as soon as the run is over, so a relay that stopped on its own
+// does not keep a timer alive for ten seconds.
+func grace(ctx, streamCtx context.Context, stopped <-chan struct{}, cancelPosts func(), logger *slog.Logger) {
+	select {
+	case <-stopped:
+		return
+	case <-streamCtx.Done():
+	}
+	if ctx.Err() != nil {
+		cancelPosts()
+		return
+	}
+
+	logger.Info("signal received, finishing the post in flight", "grace_period", shutdownGrace)
+	timer := time.NewTimer(shutdownGrace)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-stopped:
+	}
+	cancelPosts()
+}
+
+// newLogger builds the process logger from the configured level and format.
+// Everything goes to standard error, which keeps the logs out of a pipe
+// reading the process' standard output.
+func newLogger(w io.Writer, cfg *config.Config) *slog.Logger {
+	opts := &slog.HandlerOptions{Level: cfg.LogLevel}
+	if cfg.LogFormat == config.LogFormatJSON {
+		return slog.New(slog.NewJSONHandler(w, opts))
+	}
+	return slog.New(slog.NewTextHandler(w, opts))
+}
+
+// newPoster builds the Discord poster the relay posts through.
+func newPoster(cfg *config.Config, logger *slog.Logger, o options) (*discord.Poster, error) {
+	opts := []discord.Option{discord.WithLogger(logger)}
+	if o.discordBaseURL != "" {
+		opts = append(opts, discord.WithBaseURL(o.discordBaseURL))
+	}
+	return discord.New(cfg.DiscordToken.Reveal(), cfg.DiscordChannelID, opts...)
+}
+
+// newResolver builds the system-name resolver the embeds are named from.
+func newResolver(logger *slog.Logger, o options) *universe.Resolver {
+	opts := []universe.Option{universe.WithLogger(logger)}
+	if o.esiBaseURL != "" {
+		opts = append(opts, universe.WithBaseURL(o.esiBaseURL))
+	}
+	return universe.NewResolver(opts...)
 }
