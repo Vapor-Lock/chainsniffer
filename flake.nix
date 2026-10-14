@@ -85,9 +85,46 @@
             '';
             dontFixup = true;
           });
+
+        # The state directory the relay defaults to (CHAINSNIFFER_STATE_DIR), declared
+        # as a volume in the image so a container keeps its state across restarts.
+        stateDir = "/var/lib/chainsniffer";
+
+        # Runs as an unprivileged user; 65532 is the conventional "nonroot" uid of
+        # distroless-style images, and nothing in the image needs root.
+        uid = 65532;
+
+        # A single-binary image: the Go binary, the CA bundle it needs to talk TLS to
+        # Wanderer, Discord and ESI, and the state directory. No shell, no package
+        # manager, nothing else at runtime.
+        image = pkgs.dockerTools.buildLayeredImage {
+          name = "chainsniffer";
+          tag = chainsniffer.version;
+          contents = [ pkgs.cacert ];
+
+          # buildLayeredImage runs this under fakeroot in the image root, which is the
+          # only way to own a directory by a uid the build user is not.
+          fakeRootCommands = ''
+            mkdir -p .${stateDir}
+            chown -R ${toString uid}:${toString uid} .${stateDir}
+          '';
+
+          config = {
+            Entrypoint = [ "${chainsniffer}/bin/chainsniffer" ];
+            # Go finds no /etc/ssl/certs in an image this bare, so point it at the bundle.
+            Env = [ "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
+            User = "${toString uid}:${toString uid}";
+            Volumes = {
+              ${stateDir} = { };
+            };
+          };
+        };
       in
       {
-        packages.default = chainsniffer;
+        packages = {
+          default = chainsniffer;
+          inherit image;
+        };
 
         # `nix flake check` is the gate agents run before merging: tests and linters go here,
         # built offline in the Nix sandbox.
@@ -104,6 +141,10 @@
               golangci-lint run ./...
             '';
           };
+
+          # Builds the container image, so a broken image definition fails the gate
+          # rather than the next `nix build .#image`.
+          inherit image;
         };
 
         devShells.default = devflake.lib.mkShell {
