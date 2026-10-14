@@ -1,9 +1,9 @@
-// Package discord renders killmails as embeds and posts them to a Discord
-// channel.
+// Package discord posts killmails to a Discord channel as a bot: it renders
+// them as embeds and sends them, absorbing Discord's rate limits and transient
+// failures while treating a bad token or an unreachable channel as fatal.
+//
+// Render turns a classified killmail into an embed, and Poster owns the
+// Discord side of the relay: Startup proves the bot can post before the stream
+// is subscribed, and Post delivers one embed, retrying within a budget so a
+// Discord outage costs kills rather than stalling the stream.
 package discord
-
-// The poster, the embed renderer and the startup check land in later changes.
-// The blank import keeps github.com/bwmarrin/discordgo in go.mod, go.sum and
-// the vendorHash pinned in flake.nix from the start, so the beads that build
-// on this one never have to touch those files.
-import _ "github.com/bwmarrin/discordgo"
