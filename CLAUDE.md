@@ -60,21 +60,62 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-_Add your build and test commands here_
+`nix flake check` is the gate before merging. It runs everything offline in the Nix sandbox:
+`go test ./...` (through `buildGoModule`'s check phase), `go vet ./...`, `golangci-lint run ./...`
+and a build of the container image.
 
 ```bash
-# Example:
-# npm install
-# npm test
+nix flake check    # the merge gate: build + tests, vet, lint, image
+nix build          # the binary at ./result/bin/chainsniffer
+nix build .#image  # the OCI image; docker load < result
+go test ./...      # fast loop in the devshell
+go test ./internal/relay -run TestHandler -v
+gofmt -l .         # golangci-lint enforces gofmt; this is the quick check
 ```
+
+- **Nix only sees files git tracks:** `git add` a new file before `nix build` or `nix flake check`,
+  or the build fails on a missing file.
+- **`vendorHash` is pinned** in `flake.nix`. Any change to `go.mod` or `go.sum` invalidates it and
+  `nix build` fails with a hash mismatch. To update: set the value to `pkgs.lib.fakeHash`, run
+  `nix build`, and copy the `got:` hash back in (`nix build 2>&1 | grep got:`).
+- **Tests never touch the network.** Everything external is faked with `httptest` or an interface
+  the package defines itself. Keep it that way — a test that dials out fails in the sandbox.
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+chainsniffer is a single Go binary that relays killmails from one Wanderer map's SSE stream to one
+Discord channel. See `README.md` for operation and `openspec/changes/add-killmail-relay-bot/design.md`
+for the Wanderer wire format and the reasoning behind the decisions below.
+
+```
+cmd/chainsniffer    wiring, signals, exit codes (0 clean, 1 operator failure, 2 bad config)
+internal/config     env + _FILE parsing, validation, redacted summary
+internal/sse        generic SSE reader (framing only, io.Reader -> Event)
+internal/wanderer   map stream client: requests, backoff, staleness watchdog, fatal statuses
+internal/killmail   payload decoding, the Killmail type, classification, filters
+internal/discord    embed rendering, poster (rate limits, retries), channel/permission check
+internal/universe   ESI system-name resolver with an in-memory cache
+internal/state      state.json: last event ID + bounded set of posted killmail IDs
+internal/relay      the pipeline: event -> killmails -> filter/dedupe -> post -> persist cursor
+```
+
+Data flow: `wanderer` holds one SSE connection and hands each envelope to `relay`, which decodes
+its killmails, drops the ones that are duplicates or fail the filters, posts the rest through
+`discord`, and only then advances the cursor in `state` and saves. A crash mid-envelope replays it;
+the dedupe set makes that at-least-once processing with at-most-once posting.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- **Packages depend only on interfaces they declare themselves** (`Poster`, `Resolver`,
+  `Store`). `relay` composes the concrete types; everything else is unit-tested with fakes.
+  Keep new dependencies pointing inward this way.
+- **One instance per map.** There is no coordination between processes; two would double-post.
+- **Secrets live in `config.Secret`,** whose `String` and `LogValue` return `[redacted]`. Call
+  `Reveal()` only where the value goes out on the wire.
+- **Fatal versus retryable is a type, not a string.** `wanderer.FatalError` and the Discord
+  poster's classification decide whether the process exits 1 or backs off and retries.
+- **Logging is `log/slog`** on the logger threaded down from `main` via each package's
+  `WithLogger` option. No package logs on its own.
 
 <!-- BEGIN DEVFLAKE (managed by devflake-init; rerun it to update, edit outside this block) -->
 ## Development environment (devflake)
