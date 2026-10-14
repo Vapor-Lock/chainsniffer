@@ -5,3 +5,9 @@
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# devflake: agent worktrees, direnv, nix build results
+/.worktrees/
+.direnv/
+/result
+/result-*
