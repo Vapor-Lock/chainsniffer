@@ -86,15 +86,16 @@
         "openspec": "openspec"
       },
       "locked": {
-        "lastModified": 1791937842,
-        "narHash": "sha256-99vMJu19MjYurO3frDgaQsbdv3sd+4zXdCn+05h1H0U=",
+        "lastModified": 1792017397,
+        "narHash": "sha256-kribCxkjSR7CIzT6gOhI9l/fjShhfKGs9+s5oJ+sKME=",
         "owner": "slwst",
         "repo": "devflake",
-        "rev": "f31f16380e7349b57d16bb7bb76112320657d1b8",
+        "rev": "ce8d07842124fc7e5d6a712d25352caf15e92309",
         "type": "github"
       },
       "original": {
         "owner": "slwst",
+        "ref": "v0.1.0",
         "repo": "devflake",
         "type": "github"
       }

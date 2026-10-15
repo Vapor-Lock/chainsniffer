@@ -1,0 +1,11 @@
+{
+  "id": "01JBQ4Z8XK3P5R7W9Y1A2B3C4E",
+  "type": "map_kill",
+  "map_id": "f5c0a8f2-6c1d-4f3b-9f1e-2a3b4c5d6e7f",
+  "timestamp": "2026-10-13T18:43:01.000000Z",
+  "payload": {
+    "type": "kill_count",
+    "solar_system_id": 31002604,
+    "count": 3
+  }
+}
