@@ -13,7 +13,7 @@
 // at-most-once on Discord: a crash halfway through an event replays the event
 // on the next start, and the posted-killmail record in the state suppresses
 // the kills that already went out. See the "Processing order and cursor
-// semantics" section of openspec/changes/add-killmail-relay-bot/design.md.
+// semantics" section of openspec/changes/archive/2026-10-14-add-killmail-relay-bot/design.md.
 //
 // The relay composes the other packages through the three interfaces below,
 // which it declares itself, so its pipeline can be tested with fakes and

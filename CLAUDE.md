@@ -84,7 +84,7 @@ gofmt -l .         # golangci-lint enforces gofmt; this is the quick check
 ## Architecture Overview
 
 chainsniffer is a single Go binary that relays killmails from one Wanderer map's SSE stream to one
-Discord channel. See `README.md` for operation and `openspec/changes/add-killmail-relay-bot/design.md`
+Discord channel. See `README.md` for operation and `openspec/changes/archive/2026-10-14-add-killmail-relay-bot/design.md`
 for the Wanderer wire format and the reasoning behind the decisions below.
 
 ```

@@ -222,5 +222,5 @@ hash mismatch. To update it:
 | `internal/state` | `state.json` and the bounded set of posted killmail IDs. |
 | `internal/relay` | The pipeline: event to killmails to filter, dedupe, post, persist. |
 
-The specs this was built from live in `openspec/changes/add-killmail-relay-bot/`;
+The specs this was built from live in `openspec/changes/archive/2026-10-14-add-killmail-relay-bot/`;
 `design.md` there documents the Wanderer wire format and the decisions behind the layout.

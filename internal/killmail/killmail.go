@@ -3,7 +3,7 @@
 // corporations and alliances, and decides which ones are worth posting.
 //
 // Wanderer's kill payload is an internal map rather than a versioned schema
-// (see openspec/changes/add-killmail-relay-bot/design.md), so decoding is
+// (see openspec/changes/archive/2026-10-14-add-killmail-relay-bot/design.md), so decoding is
 // deliberately lenient: `killmail_id` is the only field a killmail must have,
 // and anything else that is missing, null or of an unexpected type decodes to
 // its zero value instead of failing the whole entry.

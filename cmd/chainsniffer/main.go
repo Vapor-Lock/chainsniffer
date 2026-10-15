@@ -13,7 +13,7 @@
 //	   variable named on standard error
 //
 // See the "Structured logging" and "Graceful shutdown" requirements of
-// openspec/changes/add-killmail-relay-bot/specs/relay-runtime/spec.md.
+// openspec/changes/archive/2026-10-14-add-killmail-relay-bot/specs/relay-runtime/spec.md.
 package main
 
 import (
