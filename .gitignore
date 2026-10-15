@@ -11,3 +11,6 @@
 .direnv/
 /result
 /result-*
+
+# devflake: agent worktrees, direnv, nix build results, the beads export
+.beads/issues.jsonl

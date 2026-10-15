@@ -6,7 +6,7 @@
     flake-utils.url = "github:numtide/flake-utils";
     # The agent tooling (herdr, beads, openspec, claude, ...) is pinned by devflake's own lock;
     # `nix flake update devflake` upgrades it.
-    devflake.url = "github:slwst/devflake";
+    devflake.url = "github:slwst/devflake/v0.1.0";
   };
 
   outputs =
