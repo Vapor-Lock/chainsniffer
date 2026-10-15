@@ -29,16 +29,6 @@ const (
 	PayloadKillCount = "kill_count"
 )
 
-// Envelope is the JSON envelope Wanderer sends as the `data` of every event on
-// a map's SSE stream.
-type Envelope struct {
-	ID        string          `json:"id"`
-	Type      string          `json:"type"`
-	MapID     string          `json:"map_id"`
-	Timestamp string          `json:"timestamp"`
-	Payload   json.RawMessage `json:"payload"`
-}
-
 // Party is one side of a killmail: the victim, or the pilot who landed the
 // final blow. It holds the payload's `victim_*` and `final_blow_*` field
 // groups, whose names match field for field.
@@ -71,15 +61,6 @@ type Killmail struct {
 	AttackerCount int
 	TotalValue    float64
 	NPC           bool
-}
-
-// FromEnvelope returns the killmails carried by env, in payload order. Events
-// of any type other than EventMapKill carry no killmails.
-func FromEnvelope(env Envelope, log *slog.Logger) []Killmail {
-	if env.Type != EventMapKill {
-		return nil
-	}
-	return Extract(env.Payload, log)
 }
 
 // Extract decodes a `map_kill` payload and returns its killmails in payload

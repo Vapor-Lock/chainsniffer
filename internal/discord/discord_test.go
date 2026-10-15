@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -34,6 +35,10 @@ type fakeDiscord struct {
 	postStatuses []int
 	// retryAfter is the retry_after, in seconds, sent with a 429.
 	retryAfter float64
+	// rateLimitHeaders adds Discord's X-RateLimit-* headers to every post
+	// response: the bucket is exhausted on a 429 and has room otherwise, and
+	// resets after retryAfter either way.
+	rateLimitHeaders bool
 	// tokenStatus and channelStatus, when non-zero, are the errors answered
 	// to GET /users/@me and GET /channels/{id}.
 	tokenStatus   int
@@ -136,6 +141,18 @@ func (f *fakeDiscord) handlePost(w http.ResponseWriter, r *http.Request) {
 		f.posts = append(f.posts, sent.Embeds...)
 	}
 	f.mu.Unlock()
+
+	if f.rateLimitHeaders {
+		remaining := "1"
+		if status == http.StatusTooManyRequests {
+			remaining = "0"
+		}
+		h := w.Header()
+		h.Set("X-RateLimit-Bucket", "fake-messages-bucket")
+		h.Set("X-RateLimit-Limit", "5")
+		h.Set("X-RateLimit-Remaining", remaining)
+		h.Set("X-RateLimit-Reset-After", strconv.FormatFloat(f.retryAfter, 'f', -1, 64))
+	}
 
 	switch status {
 	case 0, http.StatusCreated, http.StatusOK:

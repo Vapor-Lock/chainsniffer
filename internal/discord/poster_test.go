@@ -3,6 +3,7 @@ package discord
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -170,6 +171,104 @@ func TestPostWaitsOutRateLimit(t *testing.T) {
 	}
 	if got := len(hooks.clock.slept); got != 0 {
 		t.Errorf("Post slept %d times, want 0: discordgo waits out a 429 itself", got)
+	}
+}
+
+// A burst of kills is posted one after another while Discord rate-limits part
+// of them: every embed must arrive, exactly once and in order.
+func TestPostBurstUnderRateLimit(t *testing.T) {
+	fake, url := newFakeDiscord(t)
+	fake.rateLimitHeaders = true
+	fake.retryAfter = 0.005
+
+	const burst = 20
+	var statuses []int
+	limited := 0
+	for i := range burst {
+		switch {
+		case i%3 == 1:
+			statuses = append(statuses, http.StatusTooManyRequests)
+			limited++
+		case i == 10:
+			statuses = append(statuses, http.StatusTooManyRequests, http.StatusTooManyRequests)
+			limited += 2
+		}
+		statuses = append(statuses, 0)
+	}
+	fake.postStatuses = statuses
+	poster, hooks := newPoster(t, url)
+
+	var want []string
+	for i := range burst {
+		title := fmt.Sprintf("kill %02d", i)
+		want = append(want, title)
+		if err := poster.Post(context.Background(), &discordgo.MessageEmbed{Title: title}); err != nil {
+			t.Fatalf("Post(%q) = %v", title, err)
+		}
+	}
+
+	var titles []string
+	for _, embed := range fake.posted() {
+		titles = append(titles, embed.Title)
+	}
+	if !slices.Equal(titles, want) {
+		t.Errorf("posted titles = %v, want %v", titles, want)
+	}
+	if got := fake.count("/messages"); got != burst+limited {
+		t.Errorf("fake served %d posts, want %d: one per embed plus one per 429", got, burst+limited)
+	}
+	if got := len(hooks.clock.slept); got != 0 {
+		t.Errorf("Post slept %d times, want 0: discordgo waits out a 429 itself", got)
+	}
+}
+
+// When discordgo is told not to wait out a 429 it hands back a
+// *discordgo.RateLimitError, which the poster retries within its budget.
+func TestPostRetriesRateLimitDiscordgoDeclined(t *testing.T) {
+	fake, url := newFakeDiscord(t)
+	fake.postStatuses = []int{http.StatusTooManyRequests, http.StatusTooManyRequests, 0}
+	poster, hooks := newPoster(t, url)
+	poster.session.ShouldRetryOnRateLimit = false
+
+	if err := poster.Post(context.Background(), testEmbed()); err != nil {
+		t.Fatalf("Post() = %v", err)
+	}
+	if got := len(fake.posted()); got != 1 {
+		t.Errorf("fake accepted %d embeds, want 1", got)
+	}
+	if want := []time.Duration{defaultBackoff, 2 * defaultBackoff}; !slices.Equal(hooks.clock.slept, want) {
+		t.Errorf("Post slept %v, want %v", hooks.clock.slept, want)
+	}
+}
+
+func TestClassify(t *testing.T) {
+	restErr := func(status int) error {
+		return &discordgo.RESTError{Response: &http.Response{StatusCode: status}}
+	}
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantClass  class
+		wantStatus int
+	}{
+		{name: "rest 429", err: restErr(http.StatusTooManyRequests), wantClass: classTransient, wantStatus: 429},
+		{name: "wrapped rest 429", err: fmt.Errorf("post: %w", restErr(http.StatusTooManyRequests)),
+			wantClass: classTransient, wantStatus: 429},
+		{name: "rate limit error", err: &discordgo.RateLimitError{RateLimit: &discordgo.RateLimit{
+			TooManyRequests: &discordgo.TooManyRequests{}}}, wantClass: classTransient},
+		{name: "rest 503", err: restErr(http.StatusServiceUnavailable), wantClass: classTransient, wantStatus: 503},
+		{name: "rest 401", err: restErr(http.StatusUnauthorized), wantClass: classFatal, wantStatus: 401},
+		{name: "rest 403", err: restErr(http.StatusForbidden), wantClass: classFatal, wantStatus: 403},
+		{name: "rest 404", err: restErr(http.StatusNotFound), wantClass: classFatal, wantStatus: 404},
+		{name: "rest 400", err: restErr(http.StatusBadRequest), wantClass: classPermanent, wantStatus: 400},
+		{name: "transport error", err: errors.New("dial tcp: connection refused"), wantClass: classTransient},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotClass, gotStatus := classify(tc.err)
+			if gotClass != tc.wantClass || gotStatus != tc.wantStatus {
+				t.Errorf("classify() = %d, %d; want %d, %d", gotClass, gotStatus, tc.wantClass, tc.wantStatus)
+			}
+		})
 	}
 }
 

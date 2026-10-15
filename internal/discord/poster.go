@@ -265,15 +265,16 @@ func classify(err error) (class, int) {
 			status == http.StatusForbidden,
 			status == http.StatusNotFound:
 			return classFatal, status
-		case status >= 500:
+		case status == http.StatusTooManyRequests, status >= 500:
 			return classTransient, status
 		default:
 			return classPermanent, status
 		}
 	}
-	// Everything else is a dial failure, a timeout, a 429 discordgo declined
-	// to wait out, or its own wrapper around a 502 it ran out of retries on.
-	// None of those say the next attempt will fail too.
+	// Everything else is a dial failure, a timeout, a *discordgo.RateLimitError
+	// for a 429 discordgo declined to wait out, or its own wrapper around a
+	// 502 it ran out of retries on. None of those say the next attempt will
+	// fail too.
 	return classTransient, 0
 }
 

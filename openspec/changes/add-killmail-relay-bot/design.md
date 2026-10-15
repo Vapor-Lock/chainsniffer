@@ -101,6 +101,9 @@ Every package depends only on interfaces it defines itself, such as `Poster`, `S
 - `handle` runs synchronously in the read loop. That backpressure is deliberate: while Discord
   is slow, the server-side buffer and backfill absorb the delay, and the cursor only advances
   after `handle` returns.
+- The watchdog is paused while `handle` runs (`watchdog.Stop()` before the call, reset after it),
+  so a slow Discord post, retry backoff included, cannot read as a stale stream and trigger a
+  false reconnect.
 
 ### Processing order and cursor semantics
 

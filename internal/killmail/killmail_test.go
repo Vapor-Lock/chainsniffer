@@ -21,19 +21,26 @@ func testLogger() (*slog.Logger, *bytes.Buffer) {
 	return slog.New(h), &buf
 }
 
-// loadEnvelope reads a fixture shaped like an event Wanderer's
-// format_sse_event writes, with a payload from its message_handler.
-func loadEnvelope(t *testing.T, name string) killmail.Envelope {
+// loadPayload reads a fixture shaped like an event Wanderer's
+// format_sse_event writes, with a payload from its message_handler, and returns
+// the envelope's payload: what the relay hands to Extract.
+func loadPayload(t *testing.T, name string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", name))
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	var env killmail.Envelope
+	var env struct {
+		Type    string          `json:"type"`
+		Payload json.RawMessage `json:"payload"`
+	}
 	if err := json.Unmarshal(data, &env); err != nil {
 		t.Fatalf("decode fixture %s: %v", name, err)
 	}
-	return env
+	if env.Type != killmail.EventMapKill {
+		t.Fatalf("fixture %s has event type %q, want %q", name, env.Type, killmail.EventMapKill)
+	}
+	return env.Payload
 }
 
 func mustTime(t *testing.T, s string) time.Time {
@@ -45,14 +52,9 @@ func mustTime(t *testing.T, s string) time.Time {
 	return parsed.UTC()
 }
 
-func TestFromEnvelopeKillmailUpdate(t *testing.T) {
-	env := loadEnvelope(t, "killmail_update.json")
-	if env.ID != "01JBQ4Z8XK3P5R7W9Y1A2B3C4D" || env.Type != killmail.EventMapKill {
-		t.Fatalf("unexpected envelope %+v", env)
-	}
-
+func TestExtractKillmailUpdate(t *testing.T) {
 	log, buf := testLogger()
-	kills := killmail.FromEnvelope(env, log)
+	kills := killmail.Extract(loadPayload(t, "killmail_update.json"), log)
 	if len(kills) != 2 {
 		t.Fatalf("got %d killmails, want 2", len(kills))
 	}
@@ -87,9 +89,9 @@ func TestFromEnvelopeKillmailUpdate(t *testing.T) {
 
 // A structure kill has no victim character, which must not stop it from being
 // decoded: every field but killmail_id is optional.
-func TestFromEnvelopeStructureKill(t *testing.T) {
+func TestExtractStructureKill(t *testing.T) {
 	log, buf := testLogger()
-	kills := killmail.FromEnvelope(loadEnvelope(t, "killmail_update.json"), log)
+	kills := killmail.Extract(loadPayload(t, "killmail_update.json"), log)
 	if len(kills) != 2 {
 		t.Fatalf("got %d killmails, want 2", len(kills))
 	}
@@ -115,9 +117,9 @@ func TestFromEnvelopeStructureKill(t *testing.T) {
 	}
 }
 
-func TestFromEnvelopeKillCount(t *testing.T) {
+func TestExtractKillCount(t *testing.T) {
 	log, buf := testLogger()
-	if kills := killmail.FromEnvelope(loadEnvelope(t, "kill_count.json"), log); len(kills) != 0 {
+	if kills := killmail.Extract(loadPayload(t, "kill_count.json"), log); len(kills) != 0 {
 		t.Fatalf("got %d killmails, want none", len(kills))
 	}
 	if !strings.Contains(buf.String(), killmail.PayloadKillCount) {
@@ -125,9 +127,9 @@ func TestFromEnvelopeKillCount(t *testing.T) {
 	}
 }
 
-func TestFromEnvelopeSkipsEntriesWithoutIntegerID(t *testing.T) {
+func TestExtractSkipsEntriesWithoutIntegerID(t *testing.T) {
 	log, buf := testLogger()
-	kills := killmail.FromEnvelope(loadEnvelope(t, "missing_killmail_id.json"), log)
+	kills := killmail.Extract(loadPayload(t, "missing_killmail_id.json"), log)
 	if len(kills) != 1 {
 		t.Fatalf("got %d killmails, want 1", len(kills))
 	}
@@ -139,15 +141,6 @@ func TestFromEnvelopeSkipsEntriesWithoutIntegerID(t *testing.T) {
 	}
 	if n := strings.Count(buf.String(), "without an integer killmail_id"); n != 2 {
 		t.Errorf("got %d warnings, want 2: %s", n, buf)
-	}
-}
-
-func TestFromEnvelopeIgnoresOtherEventTypes(t *testing.T) {
-	env := loadEnvelope(t, "killmail_update.json")
-	env.Type = "connected"
-	log, _ := testLogger()
-	if kills := killmail.FromEnvelope(env, log); kills != nil {
-		t.Fatalf("got %d killmails, want none", len(kills))
 	}
 }
 
