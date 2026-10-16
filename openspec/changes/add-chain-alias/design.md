@@ -2,7 +2,7 @@
 
 ## Context
 
-`add-linked-system-filter` (implemented on `feat/home-chain-filter`, not yet archived) gave
+`add-linked-system-filter` (archived 2026-10-16) gave
 chainsniffer an in-memory map model: `topology.Graph`, filled from `GET /api/maps/{map}/systems` on
 every stream connect and every `CHAINSNIFFER_TOPOLOGY_RESYNC_INTERVAL`, and kept current from
 `connection_added`, `connection_removed` and `deleted_system`. It journals the events applied while a

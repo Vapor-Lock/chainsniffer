@@ -32,9 +32,9 @@ Pilots name the systems in their chain. A Wanderer map gives each wormhole a tem
     rejected token on `/systems` exits 1, as it already does with a home system.
 - No new settings.
 
-This change builds on `add-linked-system-filter`, which is implemented on `feat/home-chain-filter`
-but not yet archived. Archive that change first: this change's `wanderer-event-stream` and
-`relay-runtime` deltas restate requirements as that change leaves them.
+This change builds on `add-linked-system-filter` (archived as
+`openspec/changes/archive/2026-10-16-add-linked-system-filter`), whose topology model and specs it
+extends.
 
 ## Capabilities
 

@@ -52,4 +52,4 @@
 ## Workflow follow-up
 
 - Turn this change into a beads epic with the `openspec-to-epic` skill and let agents work it. 6.2 is for the captain and user, not an agent.
-- Archive `add-linked-system-filter` before this change, since this change's `wanderer-event-stream` delta restates the subscription requirement as that change leaves it.
+- Archive the change with `/opsx:archive` once the epic is closed and merged.
