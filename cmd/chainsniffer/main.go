@@ -158,26 +158,24 @@ func serve(ctx context.Context, logger *slog.Logger, cfg *config.Config, o optio
 	}
 	clientOpts := []wanderer.Option{wanderer.WithLogger(logger)}
 
-	// Without a home system none of the topology is wired: the stream asks
-	// for kills only, and /systems is never requested.
-	var (
-		graph  *topology.Graph
-		client *wanderer.Client
-	)
+	// The topology is always followed, since it is where the chain aliases
+	// in the System field come from; a home system only adds the
+	// linked-system filter on top of it.
+	var client *wanderer.Client
+	graph := topology.New(cfg.HomeSystemID, topology.WithLogger(logger))
 	if cfg.HomeSystemID != 0 {
-		graph = topology.New(cfg.HomeSystemID, topology.WithLogger(logger))
 		filters.Linked = graph.Linked
-		relayOpts = append(relayOpts, relay.WithTopology(graph))
-		// The snapshot on connect runs before the connection's first event
-		// is handled, so no kill is judged against a topology that has not
-		// been loaded. Its errors are the client's to classify: a
-		// *wanderer.FatalError ends the run, anything else reconnects.
-		clientOpts = append(clientOpts,
-			wanderer.WithEventTypes(append([]string{wanderer.EventMapKill}, topology.EventTypes...)...),
-			wanderer.WithConnectHook(func(ctx context.Context) error {
-				return graph.Resync(ctx, snapshotFetcher(client))
-			}))
 	}
+	relayOpts = append(relayOpts, relay.WithTopology(graph), relay.WithAliases(graph))
+	// The snapshot on connect runs before the connection's first event is
+	// handled, so no kill is judged or named against a topology that has not
+	// been loaded. Its errors are the client's to classify: a
+	// *wanderer.FatalError ends the run, anything else reconnects.
+	clientOpts = append(clientOpts,
+		wanderer.WithEventTypes(append([]string{wanderer.EventMapKill}, topology.EventTypes...)...),
+		wanderer.WithConnectHook(func(ctx context.Context) error {
+			return graph.Resync(ctx, snapshotFetcher(client))
+		}))
 	relayOpts = append(relayOpts, relay.WithFilters(filters))
 
 	relayer, err := relay.New(poster, newResolver(logger, o), store, relayOpts...)
@@ -192,26 +190,24 @@ func serve(ctx context.Context, logger *slog.Logger, cfg *config.Config, o optio
 		return exitFailure
 	}
 
-	if graph != nil {
-		resyncCtx, stopResync := context.WithCancel(streamCtx)
-		var resyncing sync.WaitGroup
-		resyncing.Add(1)
-		go func() {
-			defer resyncing.Done()
-			resync(resyncCtx, logger, graph, snapshotFetcher(client), cfg.TopologyResyncInterval)
-		}()
-		defer func() {
-			stopResync()
-			resyncing.Wait()
-		}()
-	}
+	resyncCtx, stopResync := context.WithCancel(streamCtx)
+	var resyncing sync.WaitGroup
+	resyncing.Add(1)
+	go func() {
+		defer resyncing.Done()
+		resync(resyncCtx, logger, graph, snapshotFetcher(client), cfg.TopologyResyncInterval)
+	}()
+	defer func() {
+		stopResync()
+		resyncing.Wait()
+	}()
 
 	// store.LastEventID is read before every connection attempt, so a
 	// reconnect resumes from the newest event the relay has finished.
 	return stop(logger, store, streamCtx, client.Run(streamCtx, store.LastEventID, relayer.Handler(postCtx)))
 }
 
-// snapshotFetcher loads the map's topology through client, in the shape the
+// snapshotFetcher loads the map's topology and chain aliases through client, in the shape the
 // graph installs.
 func snapshotFetcher(client *wanderer.Client) func(context.Context) (topology.Snapshot, error) {
 	return func(ctx context.Context) (topology.Snapshot, error) {
@@ -222,6 +218,7 @@ func snapshotFetcher(client *wanderer.Client) func(context.Context) (topology.Sn
 		out := topology.Snapshot{
 			Systems:     s.Systems,
 			Connections: make([][2]int64, 0, len(s.Connections)),
+			Aliases:     s.TemporaryNames,
 		}
 		for _, c := range s.Connections {
 			out.Connections = append(out.Connections, [2]int64{c.Source, c.Target})

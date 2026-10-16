@@ -92,9 +92,10 @@ type Config struct {
 
 	// Home chain. HomeSystemID is the EVE solar system ID kills are judged
 	// against: a kill in a system with no path to it over the map's
-	// connections is dropped. Zero means unset, in which case the relay
-	// neither loads nor follows the map's topology. TopologyResyncInterval is
-	// how often the topology is reloaded from scratch while following it.
+	// connections is dropped. Zero means unset, in which case no kill is
+	// dropped for where it happened; the map's topology, and the chain aliases
+	// with it, is followed either way. TopologyResyncInterval is how often
+	// that topology is reloaded from scratch.
 	HomeSystemID           int64
 	TopologyResyncInterval time.Duration
 

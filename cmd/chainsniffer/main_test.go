@@ -150,17 +150,22 @@ func TestRelayPostsFiltersAndResumes(t *testing.T) {
 			got[0].Get("last_event_id"), firstEventID)
 	}
 
-	// relay-runtime's "Home system unset": no topology requests, and a
-	// subscription to kills only.
+	// relay-runtime's "Topology configuration": without a home system the
+	// topology is still loaded and followed, since the chain aliases come
+	// from it.
 	for _, w := range []*fakeWanderer{first, second} {
-		if got := w.snapshotRequests(); len(got) != 0 {
-			t.Errorf("without a home system the relay requested /systems %d times, want never", len(got))
+		if got := w.snapshotRequests(); len(got) == 0 {
+			t.Error("without a home system the relay never requested /systems, want a snapshot on connect")
 		}
-		if got := w.queries(); len(got) == 0 || got[0].Get("events") != "map_kill" {
-			t.Errorf("without a home system the stream asked for events=%q, want %q", got[0].Get("events"), "map_kill")
+		if got := w.queries(); len(got) == 0 || got[0].Get("events") != allEventTypes {
+			t.Errorf("without a home system the stream asked for events=%q, want %q", got[0].Get("events"), allEventTypes)
 		}
 	}
 }
+
+// allEventTypes is the subscription the relay always asks for: kills and the
+// topology events, home system or not.
+const allEventTypes = "map_kill,connection_added,connection_removed,deleted_system,system_metadata_changed"
 
 // The systems of the home-chain test's map: home, linked to testSystemID
 // (where the fake ESI knows a name, so a kill there can be posted), and an
@@ -235,9 +240,89 @@ func TestRelayFiltersToTheHomeChain(t *testing.T) {
 	if got, want := snapshots[0].Get("Accept"), "application/json"; got != want {
 		t.Errorf("the snapshot request's Accept = %q, want %q", got, want)
 	}
-	if got := wandererFake.queries(); len(got) == 0 ||
-		got[0].Get("events") != "map_kill,connection_added,connection_removed,deleted_system,system_metadata_changed" {
+	if got := wandererFake.queries(); len(got) == 0 || got[0].Get("events") != allEventTypes {
 		t.Errorf("the stream asked for events=%q, want map_kill and the four topology types", got[0].Get("events"))
+	}
+}
+
+// TestRelayShowsTheChainAlias covers chain-aliases end to end, with and
+// without a home system: the alias the snapshot names is rendered in the
+// System field, a system_metadata_changed rename shows on the next kill, and
+// only with a home system is a kill in an island dropped.
+func TestRelayShowsTheChainAlias(t *testing.T) {
+	const (
+		hotelKillID   = 128412500
+		indiaKillID   = 128412501
+		islandKillID  = 128412502
+		hotelEventID  = "01JBQ8H0000000000000000021"
+		renameEventID = "01JBQ8H0000000000000000022"
+		indiaEventID  = "01JBQ8H0000000000000000023"
+		islandEventID = "01JBQ8H0000000000000000024"
+	)
+
+	for _, tc := range []struct {
+		name      string
+		home      bool
+		wantPosts int
+	}{
+		{name: "without a home system", home: false, wantPosts: 3},
+		{name: "with a home system", home: true, wantPosts: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			esi := newFakeESI(t)
+			discordFake, discordURL := newFakeDiscord(t)
+			wandererFake, wandererURL := newFakeWanderer(t,
+				killFrame(hotelEventID, killmailJSON(hotelKillID, false))+
+					metadataChangedFrame(renameEventID, testSystemID, "INDIA")+
+					killFrame(indiaEventID, killmailJSON(indiaKillID, false))+
+					killFrameIn(islandEventID, islandSystemID, killmailJSONIn(islandKillID, islandSystemID, false)))
+			wandererFake.snapshot = snapshotJSONAliased(
+				[]int64{homeSystemID, testSystemID, islandSystemID},
+				map[int64]string{testSystemID: "HOTEL"},
+				[2]int64{homeSystemID, testSystemID})
+
+			vars := testEnv(dir, wandererURL)
+			if tc.home {
+				vars[config.EnvHomeSystemID] = fmt.Sprint(homeSystemID)
+			}
+			logs, stop := startRelay(t, vars, withDiscordBaseURL(discordURL), withESIBaseURL(esi))
+			waitFor(t, "the last event to be recorded", func() bool {
+				return readState(t, dir).LastEventID == islandEventID
+			})
+			if code := stop(); code != exitOK {
+				t.Errorf("run() = %d, want %d; logs:\n%s", code, exitOK, logs)
+			}
+
+			posts := discordFake.posted()
+			if len(posts) != tc.wantPosts {
+				t.Fatalf("Discord received %d posts, want %d; logs:\n%s", len(posts), tc.wantPosts, logs)
+			}
+			for i, want := range []string{testSystemName + " (HOTEL)", testSystemName + " (INDIA)"} {
+				if !hasField(posts[i], want) {
+					t.Errorf("post %d has no System field %q: %+v", i, want, posts[i].Fields)
+				}
+			}
+			assertLogged(t, logs.String(), map[string]any{
+				"msg": "posted killmail", "killmail_id": float64(hotelKillID), "chain_alias": "HOTEL",
+			})
+			if tc.home {
+				assertLogged(t, logs.String(), map[string]any{
+					"msg": "dropping killmail", "killmail_id": float64(islandKillID),
+					"filter": killmail.FilterUnlinkedSystem,
+				})
+			} else if want := fmt.Sprintf("https://zkillboard.com/kill/%d/", islandKillID); posts[2].URL != want {
+				t.Errorf("third posted embed URL = %q, want %q: without a home system an island kill is posted",
+					posts[2].URL, want)
+			}
+
+			if got := wandererFake.queries(); len(got) == 0 || got[0].Get("events") != allEventTypes {
+				t.Errorf("the stream asked for events=%q, want %q", got[0].Get("events"), allEventTypes)
+			}
+			if len(wandererFake.snapshotRequests()) == 0 {
+				t.Error("the relay never requested /systems")
+			}
+		})
 	}
 }
 
@@ -320,6 +405,15 @@ func TestRunExitsOneOnFatalFailures(t *testing.T) {
 			name: "Wanderer rejects the token on /systems",
 			setup: func(_ *testing.T, vars map[string]string, _ *fakeDiscord, w *fakeWanderer) {
 				vars[config.EnvHomeSystemID] = fmt.Sprint(homeSystemID)
+				w.snapshotStatus = http.StatusUnauthorized
+			},
+			wantLog: "the map systems request",
+		},
+		{
+			// relay-runtime's "Topology configuration": the snapshot is
+			// taken without a home system too.
+			name: "Wanderer rejects the token on /systems without a home system",
+			setup: func(_ *testing.T, _ map[string]string, _ *fakeDiscord, w *fakeWanderer) {
 				w.snapshotStatus = http.StatusUnauthorized
 			},
 			wantLog: "the map systems request",
@@ -611,7 +705,9 @@ type fakeWanderer struct {
 func newFakeWanderer(t *testing.T, frames string) (*fakeWanderer, string) {
 	t.Helper()
 
-	f := &fakeWanderer{frames: frames}
+	// Every connection takes a snapshot, so the default is a map holding
+	// the one system the kills happen in.
+	f := &fakeWanderer{frames: frames, snapshot: snapshotJSON([]int64{testSystemID})}
 	server := httptest.NewServer(f)
 	t.Cleanup(server.Close)
 	return f, server.URL
@@ -737,15 +833,38 @@ func connectionRemovedFrame(eventID string, source, target int64) string {
 // MapSystemAPIController.index, listing systems and the connections between
 // the given pairs.
 func snapshotJSON(systems []int64, connections ...[2]int64) string {
+	return snapshotJSONAliased(systems, nil, connections...)
+}
+
+// snapshotJSONAliased is snapshotJSON with the given systems' temporary names
+// set; every other system's is null, as Wanderer serializes an unset one.
+func snapshotJSONAliased(systems []int64, aliases map[int64]string, connections ...[2]int64) string {
 	var ss, cs []string
 	for _, id := range systems {
-		ss = append(ss, fmt.Sprintf(`{"solar_system_id":%d,"name":"S%d","visible":true}`, id, id))
+		alias := "null"
+		if name, ok := aliases[id]; ok {
+			alias = fmt.Sprintf("%q", name)
+		}
+		ss = append(ss, fmt.Sprintf(`{"solar_system_id":%d,"name":"S%d","temporary_name":%s,"visible":true}`,
+			id, id, alias))
 	}
 	for _, c := range connections {
 		cs = append(cs, fmt.Sprintf(`{"solar_system_source":%d,"solar_system_target":%d,"type":0}`, c[0], c[1]))
 	}
 	return fmt.Sprintf(`{"data":{"systems":[%s],"connections":[%s]}}`,
 		strings.Join(ss, ","), strings.Join(cs, ","))
+}
+
+// metadataChangedFrame is a system_metadata_changed frame in the payload shape
+// Wanderer's update_map_system_last_activity broadcasts, setting the system's
+// temporary name.
+func metadataChangedFrame(eventID string, systemID int64, temporaryName string) string {
+	payload := fmt.Sprintf(`{"system_id":"5ca1ab1e-0000-4000-8000-000000000001","solar_system_id":%d,`+
+		`"name":"S%d","temporary_name":%q,"labels":null,"description":null,"status":0,"locked":false,`+
+		`"position_x":0,"position_y":0}`, systemID, systemID, temporaryName)
+	return frame(eventID, "system_metadata_changed", fmt.Sprintf(
+		`{"id":%q,"type":"system_metadata_changed","map_id":%q,"timestamp":%q,"payload":%s}`,
+		eventID, testMapID, stamp(), payload))
 }
 
 func frame(id, eventType, data string) string {
