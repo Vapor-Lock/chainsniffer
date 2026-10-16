@@ -5,10 +5,12 @@
 // Handle is what internal/wanderer calls for every event, in stream order, and
 // it dispatches on the event type. For each killmail a map_kill event carries
 // it skips the ones already posted, applies the filters, resolves the system
-// name, renders the embed and posts it, recording the kill as posted only once
-// Discord has accepted it. A topology event (deleted_system, connection_added,
-// connection_removed) goes to the [Topology], when one is configured, which
-// keeps the map graph the linked-system filter reads. Once the whole event is
+// name and the chain alias, renders the embed and posts it, recording the kill
+// as posted only once Discord has accepted it. A topology event
+// (deleted_system, connection_added, connection_removed,
+// system_metadata_changed) goes to the [Topology], when one is configured,
+// which keeps the map graph the linked-system filter reads and the chain
+// aliases the [Aliases] answer from. Once the whole event is
 // handled — and not before — the cursor moves to the event's ID and the state
 // is written to disk, whatever the event's type.
 //
@@ -42,13 +44,14 @@ import (
 // not a filter, that remembers.
 const FilterDuplicate = "duplicate"
 
-// Wanderer's SSE event types that change the map topology. Handle passes them
-// to the [Topology]; the wiring subscribes to them, alongside
-// [killmail.EventMapKill], only when a home system is configured.
+// Wanderer's SSE event types that change the map topology or a system's chain
+// alias. Handle passes them to the [Topology]; the wiring subscribes to them
+// alongside [killmail.EventMapKill].
 const (
-	EventDeletedSystem     = "deleted_system"
-	EventConnectionAdded   = "connection_added"
-	EventConnectionRemoved = "connection_removed"
+	EventDeletedSystem         = "deleted_system"
+	EventConnectionAdded       = "connection_added"
+	EventConnectionRemoved     = "connection_removed"
+	EventSystemMetadataChanged = "system_metadata_changed"
 )
 
 // Poster posts one rendered killmail to the Discord channel.
@@ -83,12 +86,21 @@ type Store interface {
 }
 
 // Topology is the map graph the linked-system filter reads, kept current from
-// the stream's topology events.
+// the stream's topology and metadata events.
 //
 // It is internal/topology's graph. Apply decodes the payload itself and logs
 // and ignores one it cannot use, so it cannot fail the event.
 type Topology interface {
 	Apply(eventType string, payload json.RawMessage)
+}
+
+// Aliases answers a solar system's chain alias, the temporary name the map
+// gives it, for the embed's System field.
+//
+// It is internal/topology's graph, the same one the [Topology] events go to.
+// Alias returns "" for a system with no alias or not on the map.
+type Aliases interface {
+	Alias(id int64) string
 }
 
 // Relay is the pipeline. The zero value is not usable; call [New].
@@ -97,6 +109,7 @@ type Relay struct {
 	resolver Resolver
 	store    Store
 	topology Topology
+	aliases  Aliases
 
 	friendlies killmail.Friendlies
 	filters    killmail.Filters
@@ -106,6 +119,7 @@ type Relay struct {
 
 type options struct {
 	topology   Topology
+	aliases    Aliases
 	friendlies killmail.Friendlies
 	filters    killmail.Filters
 	logger     *slog.Logger
@@ -131,6 +145,12 @@ func WithFilters(f killmail.Filters) Option {
 // topology events are ignored, though they still advance the cursor.
 func WithTopology(t Topology) Option {
 	return func(o *options) { o.topology = t }
+}
+
+// WithAliases sets where the chain alias of a posted kill's system is looked
+// up. Without one, or with a nil one, no embed shows an alias.
+func WithAliases(a Aliases) Option {
+	return func(o *options) { o.aliases = a }
 }
 
 // WithLogger sets the logger the pipeline reports on. A nil logger keeps
@@ -175,6 +195,7 @@ func New(poster Poster, resolver Resolver, store Store, opts ...Option) (*Relay,
 		resolver:   resolver,
 		store:      store,
 		topology:   o.topology,
+		aliases:    o.aliases,
 		friendlies: o.friendlies,
 		filters:    o.filters,
 		logger:     o.logger,
@@ -207,9 +228,9 @@ func (r *Relay) Handle(ctx context.Context, env wanderer.Envelope) error {
 				return err
 			}
 		}
-	case EventDeletedSystem, EventConnectionAdded, EventConnectionRemoved:
+	case EventDeletedSystem, EventConnectionAdded, EventConnectionRemoved, EventSystemMetadataChanged:
 		if r.topology == nil {
-			r.logger.Debug("ignoring topology event without a home system",
+			r.logger.Debug("ignoring topology event without a topology",
 				"event_id", env.ID, "event_type", env.Type)
 			break
 		}
@@ -241,7 +262,8 @@ func (r *Relay) handle(ctx context.Context, k killmail.Killmail) error {
 	}
 
 	name := r.resolver.Name(ctx, k.SolarSystemID)
-	if err := r.poster.Post(ctx, discord.Render(k, class, name)); err != nil {
+	alias := r.alias(k.SolarSystemID)
+	if err := r.poster.Post(ctx, discord.Render(k, class, name, alias)); err != nil {
 		switch {
 		case ctx.Err() != nil:
 			// A post torn down by shutdown is not a post Discord refused, and
@@ -261,9 +283,20 @@ func (r *Relay) handle(ctx context.Context, k killmail.Killmail) error {
 
 	// Only now, with Discord's acceptance in hand, is the kill a duplicate.
 	r.store.MarkPosted(k.ID)
-	r.logger.Info("posted killmail", "killmail_id", k.ID, "classification", string(class),
-		"solar_system", name)
+	attrs := []any{"killmail_id", k.ID, "classification", string(class), "solar_system", name}
+	if alias != "" {
+		attrs = append(attrs, "chain_alias", alias)
+	}
+	r.logger.Info("posted killmail", attrs...)
 	return nil
+}
+
+// alias is the chain alias of a solar system, or "" without an [Aliases].
+func (r *Relay) alias(id int64) string {
+	if r.aliases == nil {
+		return ""
+	}
+	return r.aliases.Alias(id)
 }
 
 // dropped logs a killmail that was not posted and the filter that decided so,

@@ -59,6 +59,7 @@ func TestRenderGolden(t *testing.T) {
 		kill       killmail.Killmail
 		class      killmail.Classification
 		systemName string
+		alias      string
 	}{
 		{
 			name:       "typical kill",
@@ -99,6 +100,16 @@ func TestRenderGolden(t *testing.T) {
 			systemName: "J100001",
 		},
 		{
+			// "Kill in a named system": the map's temporary name follows the
+			// system name in the System field.
+			name:       "chain alias",
+			golden:     "render_alias.json",
+			kill:       typicalKill(t),
+			class:      killmail.Kill,
+			systemName: "J134349",
+			alias:      "HOTEL",
+		},
+		{
 			// Everything optional is missing, which is all Wanderer
 			// guarantees: the embed still has a title, a link and a colour.
 			name:       "minimal fields",
@@ -111,7 +122,7 @@ func TestRenderGolden(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := json.MarshalIndent(discord.Render(tc.kill, tc.class, tc.systemName), "", "  ")
+			got, err := json.MarshalIndent(discord.Render(tc.kill, tc.class, tc.systemName, tc.alias), "", "  ")
 			if err != nil {
 				t.Fatalf("marshalling the embed: %v", err)
 			}
@@ -137,7 +148,7 @@ func TestRenderGolden(t *testing.T) {
 // "Typical kill": the title names the ship and the pilot, and the fields carry
 // everything the requirement lists.
 func TestRenderTypicalKillContent(t *testing.T) {
-	embed := discord.Render(typicalKill(t), killmail.Kill, "J123456")
+	embed := discord.Render(typicalKill(t), killmail.Kill, "J123456", "")
 
 	if got, want := embed.Title, "Stratios — Pilot A"; got != want {
 		t.Errorf("Title = %q, want %q", got, want)
@@ -173,7 +184,7 @@ func TestRenderTypicalKillContent(t *testing.T) {
 // "zKillboard link" and "Links and images": the title links to the kill and
 // the thumbnail is the victim ship's render.
 func TestRenderLinksAndImages(t *testing.T) {
-	embed := discord.Render(typicalKill(t), killmail.Kill, "Thera")
+	embed := discord.Render(typicalKill(t), killmail.Kill, "Thera", "")
 
 	if got, want := embed.URL, "https://zkillboard.com/kill/123456789/"; got != want {
 		t.Errorf("URL = %q, want %q", got, want)
@@ -188,7 +199,7 @@ func TestRenderLinksAndImages(t *testing.T) {
 	// An unknown ship type has no render to show.
 	k := typicalKill(t)
 	k.Victim.ShipTypeID = 0
-	if thumb := discord.Render(k, killmail.Kill, "Thera").Thumbnail; thumb != nil {
+	if thumb := discord.Render(k, killmail.Kill, "Thera", "").Thumbnail; thumb != nil {
 		t.Errorf("Thumbnail = %+v, want nil when the ship type ID is unknown", thumb)
 	}
 }
@@ -207,7 +218,7 @@ func TestRenderClassificationStyling(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(string(tc.class), func(t *testing.T) {
-			embed := discord.Render(typicalKill(t), tc.class, "Thera")
+			embed := discord.Render(typicalKill(t), tc.class, "Thera", "")
 			if embed.Color != tc.wantColor {
 				t.Errorf("Color = %#x, want %#x", embed.Color, tc.wantColor)
 			}
@@ -228,7 +239,7 @@ func TestRenderClassificationStyling(t *testing.T) {
 // "Missing optional fields": whatever the payload left out is dropped, and the
 // embed is still postable.
 func TestRenderDegradesGracefully(t *testing.T) {
-	embed := discord.Render(killmail.Killmail{ID: 42}, killmail.Neutral, "")
+	embed := discord.Render(killmail.Killmail{ID: 42}, killmail.Neutral, "", "")
 
 	if got, want := embed.Title, "Unknown ship — Unknown pilot"; got != want {
 		t.Errorf("Title = %q, want %q", got, want)
@@ -284,7 +295,7 @@ func TestRenderPartialAffiliations(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			k := killmail.Killmail{ID: 7, Victim: tc.victim, FinalBlow: tc.finalBlow}
-			embed := discord.Render(k, killmail.Neutral, "Thera")
+			embed := discord.Render(k, killmail.Neutral, "Thera", "")
 			if got := embed.Title; got != tc.wantTitlePrefix {
 				t.Errorf("Title = %q, want %q", got, tc.wantTitlePrefix)
 			}
@@ -302,6 +313,45 @@ func TestRenderPartialAffiliations(t *testing.T) {
 				if strings.Contains(value, " / ") && !strings.Contains(tc.wantVictim+tc.wantFinalBlow, " / ") {
 					t.Errorf("field %q = %q, want no dangling separator", name, value)
 				}
+			}
+		})
+	}
+}
+
+// systemField renders the typical kill with the given name and alias and
+// returns the System field's value.
+func systemField(t *testing.T, systemName, alias string) string {
+	t.Helper()
+	for _, f := range discord.Render(typicalKill(t), killmail.Kill, systemName, alias).Fields {
+		if f.Name == "System" {
+			return f.Value
+		}
+	}
+	t.Fatalf("no System field for name %q and alias %q", systemName, alias)
+	return ""
+}
+
+// "Chain alias": the alias follows the name in parentheses, is escaped for
+// Discord markdown and capped, and an empty alias leaves the name alone.
+func TestRenderChainAlias(t *testing.T) {
+	long := strings.Repeat("a", 300)
+	tests := []struct {
+		name       string
+		systemName string
+		alias      string
+		want       string
+	}{
+		{name: "named system", systemName: "J134349", alias: "HOTEL", want: "J134349 (HOTEL)"},
+		{name: "name not resolved", systemName: "31001234", alias: "HOTEL", want: "31001234 (HOTEL)"},
+		{name: "no alias", systemName: "J134349", alias: "", want: "J134349"},
+		{name: "markdown escaped", systemName: "J134349", alias: "A_B_", want: `J134349 (A\_B\_)`},
+		{name: "every markdown character", systemName: "J134349", alias: "\\*_~`|", want: "J134349 (\\\\\\*\\_\\~\\`\\|)"},
+		{name: "capped", systemName: "J134349", alias: long, want: "J134349 (" + long[:100] + ")"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := systemField(t, tc.systemName, tc.alias); got != tc.want {
+				t.Errorf("System field = %q, want %q", got, tc.want)
 			}
 		})
 	}
