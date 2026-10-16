@@ -96,7 +96,7 @@ internal/killmail   payload decoding, the Killmail type, classification, filters
 internal/discord    embed rendering, poster (rate limits, retries), channel/permission check
 internal/universe   ESI system-name resolver with an in-memory cache
 internal/state      state.json: last event ID + bounded set of posted killmail IDs
-internal/topology   map graph from the /systems snapshot + topology events; systems linked to home
+internal/topology   map graph from the /systems snapshot + stream events: systems linked to home, chain aliases
 internal/relay      the pipeline: event -> killmails -> filter/dedupe -> post -> persist cursor
 ```
 
