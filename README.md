@@ -94,6 +94,17 @@ With no friendly IDs configured every kill is neutral, which is a fine way to ru
 plain in-chain kill feed. Turning `CHAINSNIFFER_FRIENDLY_ONLY` on without friendly IDs would post
 nothing at all, so that combination is rejected at startup.
 
+### Home chain
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CHAINSNIFFER_HOME_SYSTEM_ID` | unset | EVE solar system ID of the home system, e.g. `31000727`. When set, kills in systems not linked to it are dropped. Must be a positive integer. |
+| `CHAINSNIFFER_TOPOLOGY_RESYNC_INTERVAL` | `15m` | How often the map's topology is reloaded from scratch, as a Go duration. Only used with a home system, but validated either way. |
+
+A system is linked when a path over the map's connections leads to it from the home system,
+following connections in either direction and of any type; the home system itself is always
+linked. Leave `CHAINSNIFFER_HOME_SYSTEM_ID` unset to relay kills from every system on the map.
+
 ### Runtime
 
 | Variable | Default | Description |

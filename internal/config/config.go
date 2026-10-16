@@ -35,6 +35,9 @@ const (
 	EnvMinValue            = "CHAINSNIFFER_MIN_VALUE"
 	EnvMaxKillAge          = "CHAINSNIFFER_MAX_KILL_AGE"
 
+	EnvHomeSystemID           = "CHAINSNIFFER_HOME_SYSTEM_ID"
+	EnvTopologyResyncInterval = "CHAINSNIFFER_TOPOLOGY_RESYNC_INTERVAL"
+
 	EnvStateDir  = "CHAINSNIFFER_STATE_DIR"
 	EnvLogLevel  = "CHAINSNIFFER_LOG_LEVEL"
 	EnvLogFormat = "CHAINSNIFFER_LOG_FORMAT"
@@ -47,11 +50,12 @@ const FileSuffix = "_FILE"
 
 // Defaults for the optional settings.
 const (
-	DefaultStateDir   = "/var/lib/chainsniffer"
-	DefaultMaxKillAge = time.Hour
-	DefaultExcludeNPC = true
-	DefaultLogLevel   = slog.LevelInfo
-	DefaultLogFormat  = LogFormatText
+	DefaultStateDir               = "/var/lib/chainsniffer"
+	DefaultMaxKillAge             = time.Hour
+	DefaultExcludeNPC             = true
+	DefaultTopologyResyncInterval = 15 * time.Minute
+	DefaultLogLevel               = slog.LevelInfo
+	DefaultLogFormat              = LogFormatText
 )
 
 // LogFormat selects the slog handler the relay logs through.
@@ -85,6 +89,14 @@ type Config struct {
 	ExcludeNPC          bool
 	MinValue            float64 // ISK; a killmail below this is dropped
 	MaxKillAge          time.Duration
+
+	// Home chain. HomeSystemID is the EVE solar system ID kills are judged
+	// against: a kill in a system with no path to it over the map's
+	// connections is dropped. Zero means unset, in which case the relay
+	// neither loads nor follows the map's topology. TopologyResyncInterval is
+	// how often the topology is reloaded from scratch while following it.
+	HomeSystemID           int64
+	TopologyResyncInterval time.Duration
 
 	// Runtime.
 	StateDir  string
@@ -124,6 +136,9 @@ func Load(lookup LookupFunc) (*Config, error) {
 		MinValue:            l.isk(EnvMinValue),
 		MaxKillAge:          l.duration(EnvMaxKillAge, DefaultMaxKillAge),
 
+		HomeSystemID:           l.systemID(EnvHomeSystemID),
+		TopologyResyncInterval: l.duration(EnvTopologyResyncInterval, DefaultTopologyResyncInterval),
+
 		StateDir:  l.optional(EnvStateDir, DefaultStateDir),
 		LogLevel:  l.level(EnvLogLevel),
 		LogFormat: l.logFormat(EnvLogFormat),
@@ -158,6 +173,8 @@ func (c *Config) LogValue() slog.Value {
 		slog.Bool("exclude_npc", c.ExcludeNPC),
 		slog.Float64("min_value", c.MinValue),
 		slog.Duration("max_kill_age", c.MaxKillAge),
+		slog.Int64("home_system_id", c.HomeSystemID),
+		slog.Duration("topology_resync_interval", c.TopologyResyncInterval),
 		slog.String("state_dir", c.StateDir),
 		slog.String("log_level", c.LogLevel.String()),
 		slog.String("log_format", string(c.LogFormat)),
@@ -340,6 +357,26 @@ func (l *loader) boolean(name string, def bool) bool {
 	return b
 }
 
+// systemID parses an optional EVE solar system ID. Unset returns 0; a value
+// that is set has to be a positive integer, because 0 would read as "unset"
+// and quietly turn the filter off.
+func (l *loader) systemID(name string) int64 {
+	v, ok := l.value(name)
+	if !ok {
+		return 0
+	}
+	id, err := strconv.ParseInt(v, 10, 64)
+	switch {
+	case err != nil:
+		l.errorf("%s: %q is not a solar system ID (a positive integer)", name, v)
+	case id <= 0:
+		l.errorf("%s: %q must be a positive solar system ID", name, v)
+	default:
+		return id
+	}
+	return 0
+}
+
 // isk parses an ISK amount. Values are floats because killmail totals are.
 func (l *loader) isk(name string) float64 {
 	v, ok := l.value(name)
@@ -360,8 +397,9 @@ func (l *loader) isk(name string) float64 {
 	return 0
 }
 
-// duration parses a Go duration. Zero and negative values are rejected: they
-// would drop every killmail, which is never what an operator means.
+// duration parses a Go duration. Zero and negative values are rejected: as a
+// kill age they would drop every killmail, and as a resync interval they would
+// reload the topology in a busy loop, neither of which an operator means.
 func (l *loader) duration(name string, def time.Duration) time.Duration {
 	v, ok := l.value(name)
 	if !ok {

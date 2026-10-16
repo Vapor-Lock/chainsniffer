@@ -70,9 +70,13 @@ func TestLoadMinimal(t *testing.T) {
 		ExcludeNPC:       true,
 		MinValue:         0,
 		MaxKillAge:       time.Hour,
-		StateDir:         "/var/lib/chainsniffer",
-		LogLevel:         slog.LevelInfo,
-		LogFormat:        config.LogFormatText,
+		// No home system: the topology is neither loaded nor followed, but
+		// the resync interval still carries its default.
+		HomeSystemID:           0,
+		TopologyResyncInterval: 15 * time.Minute,
+		StateDir:               "/var/lib/chainsniffer",
+		LogLevel:               slog.LevelInfo,
+		LogFormat:              config.LogFormatText,
 	}
 	// want leaves both friendly ID slices nil, which is what no configured
 	// friendly IDs has to produce.
@@ -178,6 +182,46 @@ func TestLoad(t *testing.T) {
 				}
 				if cfg.MaxKillAge != 90*time.Minute {
 					t.Errorf("MaxKillAge = %v, want 90m", cfg.MaxKillAge)
+				}
+			},
+		},
+		{
+			name: "home system and resync interval",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvHomeSystemID] = "31000727"
+				env[config.EnvTopologyResyncInterval] = "5m"
+			},
+			check: func(t *testing.T, cfg *config.Config) {
+				if cfg.HomeSystemID != 31000727 {
+					t.Errorf("HomeSystemID = %d, want 31000727", cfg.HomeSystemID)
+				}
+				if cfg.TopologyResyncInterval != 5*time.Minute {
+					t.Errorf("TopologyResyncInterval = %v, want 5m", cfg.TopologyResyncInterval)
+				}
+			},
+		},
+		{
+			name: "home system with the default resync interval",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvHomeSystemID] = " 31000727\n"
+			},
+			check: func(t *testing.T, cfg *config.Config) {
+				if cfg.HomeSystemID != 31000727 {
+					t.Errorf("HomeSystemID = %d, want 31000727", cfg.HomeSystemID)
+				}
+				if cfg.TopologyResyncInterval != config.DefaultTopologyResyncInterval {
+					t.Errorf("TopologyResyncInterval = %v, want the default", cfg.TopologyResyncInterval)
+				}
+			},
+		},
+		{
+			name: "blank home system is unset",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvHomeSystemID] = ""
+			},
+			check: func(t *testing.T, cfg *config.Config) {
+				if cfg.HomeSystemID != 0 {
+					t.Errorf("HomeSystemID = %d, want 0 (unset)", cfg.HomeSystemID)
 				}
 			},
 		},
@@ -450,6 +494,55 @@ func TestLoadErrors(t *testing.T) {
 			problems: 1,
 		},
 		{
+			name: "home system that is a name, not an ID",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvHomeSystemID] = "J142845"
+			},
+			want:     []string{config.EnvHomeSystemID, "J142845"},
+			problems: 1,
+		},
+		{
+			name: "home system zero",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvHomeSystemID] = "0"
+			},
+			want:     []string{config.EnvHomeSystemID, "positive"},
+			problems: 1,
+		},
+		{
+			name: "negative home system",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvHomeSystemID] = "-31000727"
+			},
+			want:     []string{config.EnvHomeSystemID, "positive"},
+			problems: 1,
+		},
+		{
+			name: "resync interval that is not a duration",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvTopologyResyncInterval] = "soon"
+			},
+			want:     []string{config.EnvTopologyResyncInterval, "soon", "duration"},
+			problems: 1,
+		},
+		{
+			name: "zero resync interval",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvTopologyResyncInterval] = "0"
+			},
+			want:     []string{config.EnvTopologyResyncInterval, "positive"},
+			problems: 1,
+		},
+		{
+			name: "negative resync interval",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvHomeSystemID] = "31000727"
+				env[config.EnvTopologyResyncInterval] = "-15m"
+			},
+			want:     []string{config.EnvTopologyResyncInterval, "positive"},
+			problems: 1,
+		},
+		{
 			name: "unknown log level",
 			setup: func(_ *testing.T, env map[string]string) {
 				env[config.EnvLogLevel] = "loud"
@@ -493,14 +586,18 @@ func TestLoadErrors(t *testing.T) {
 				env[config.EnvMinValue] = "ten"
 				env[config.EnvLogLevel] = "loud"
 				env[config.EnvFriendlyCorpIDs] = "abc"
+				env[config.EnvHomeSystemID] = "J142845"
+				env[config.EnvTopologyResyncInterval] = "soon"
 			},
 			want: []string{
 				config.EnvDiscordChannelID,
 				config.EnvMinValue,
 				config.EnvLogLevel,
 				config.EnvFriendlyCorpIDs,
+				config.EnvHomeSystemID,
+				config.EnvTopologyResyncInterval,
 			},
-			problems: 4,
+			problems: 6,
 		},
 	}
 
@@ -593,6 +690,27 @@ func TestConfigLogValueRedactsTokens(t *testing.T) {
 				t.Errorf("found %d redactions in %q, want 2", got, line)
 			}
 		})
+	}
+}
+
+func TestConfigLogValueIncludesTopology(t *testing.T) {
+	t.Parallel()
+
+	env := baseEnv()
+	env[config.EnvHomeSystemID] = "31000727"
+	cfg, err := config.Load(lookup(env))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	var buf bytes.Buffer
+	slog.New(slog.NewTextHandler(&buf, nil)).Info("starting", "config", cfg)
+
+	line := buf.String()
+	for _, want := range []string{"home_system_id=31000727", "topology_resync_interval=15m0s"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("log line %q does not contain %q", line, want)
+		}
 	}
 }
 
