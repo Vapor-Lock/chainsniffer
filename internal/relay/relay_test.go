@@ -560,3 +560,94 @@ func TestWithFatalPostReplacesTheClassification(t *testing.T) {
 		t.Fatalf("Handle() = %v, want the error the classifier called fatal", err)
 	}
 }
+
+// fakeTopology records the events applied to it, and the cursor the store held
+// at the time, so a test can tell the event was applied before the cursor
+// moved past it.
+type fakeTopology struct {
+	store   *fakeStore
+	applied []appliedEvent
+}
+
+type appliedEvent struct {
+	eventType    string
+	payload      string
+	cursorAtCall string
+}
+
+func (g *fakeTopology) Apply(eventType string, payload json.RawMessage) {
+	g.applied = append(g.applied, appliedEvent{eventType, string(payload), g.store.lastEventID})
+}
+
+func TestHandleAppliesTopologyEventsAndAdvancesTheCursor(t *testing.T) {
+	for _, eventType := range []string{EventDeletedSystem, EventConnectionAdded, EventConnectionRemoved} {
+		t.Run(eventType, func(t *testing.T) {
+			graph := &fakeTopology{}
+			f := newFixture(t, WithTopology(graph))
+			graph.store = f.store
+			f.store.lastEventID = "01JB"
+
+			payload := `{"solar_system_source_id":31000001,"solar_system_target_id":31000002}`
+			f.handle(t, wanderer.Envelope{ID: "01JC", Type: eventType, Payload: []byte(payload)})
+
+			want := []appliedEvent{{eventType, payload, "01JB"}}
+			if !slices.Equal(graph.applied, want) {
+				t.Errorf("applied = %+v, want %+v", graph.applied, want)
+			}
+			if len(f.store.saves) != 1 || f.store.saves[0].lastEventID != "01JC" {
+				t.Errorf("saves = %+v, want one with cursor 01JC", f.store.saves)
+			}
+			if f.poster.calls != 0 {
+				t.Errorf("Post called %d times, want none", f.poster.calls)
+			}
+		})
+	}
+}
+
+func TestHandleIgnoresTopologyEventsWithoutATopology(t *testing.T) {
+	f := newFixture(t)
+
+	f.handle(t, wanderer.Envelope{ID: "01JC", Type: EventConnectionRemoved, Payload: []byte(`{}`)})
+
+	if len(f.store.saves) != 1 || f.store.saves[0].lastEventID != "01JC" {
+		t.Errorf("saves = %+v, want one with cursor 01JC", f.store.saves)
+	}
+	if !strings.Contains(f.logs.String(), "event_type="+EventConnectionRemoved) {
+		t.Error("an ignored topology event is not logged")
+	}
+}
+
+// A topology never sees map_kill events, and kills go through the pipeline as
+// they do without one.
+func TestHandleKeepsKillsOffTheTopology(t *testing.T) {
+	graph := &fakeTopology{}
+	f := newFixture(t, WithTopology(graph))
+	graph.store = f.store
+
+	f.handle(t, envelope(t, "01JB", kill(1)))
+
+	wantPosted(t, f, 1)
+	if len(graph.applied) != 0 {
+		t.Errorf("applied = %+v, want nothing", graph.applied)
+	}
+	if f.store.lastEventID != "01JB" {
+		t.Errorf("cursor = %q, want 01JB", f.store.lastEventID)
+	}
+}
+
+// With the linked-system filter configured, the relay drops a kill in an
+// island and logs the filter's reason.
+func TestHandleDropsKillsInUnlinkedSystems(t *testing.T) {
+	const island = 31000099
+	f := newFixture(t, WithFilters(killmail.Filters{Linked: func(id int64) bool { return id == systemID }}))
+
+	f.handle(t, envelope(t, "01JB", kill(1), kill(2, map[string]any{"solar_system_id": island})))
+
+	wantPosted(t, f, 1)
+	if !strings.Contains(f.logs.String(), "killmail_id=2 filter="+killmail.FilterUnlinkedSystem) {
+		t.Errorf("the unlinked drop is not logged:\n%s", f.logs.String())
+	}
+	if f.store.lastEventID != "01JB" {
+		t.Errorf("cursor = %q, want 01JB", f.store.lastEventID)
+	}
+}

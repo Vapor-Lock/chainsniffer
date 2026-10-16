@@ -176,9 +176,10 @@ func TestFiltersAllow(t *testing.T) {
 	}
 }
 
-// The chain reports the first filter that matches, in the order NPC, minimum
-// value, friendly-only, maximum age, so the relay's debug line names one
-// filter even when several would drop the kill.
+// The chain reports the first filter that matches, in the order linked system
+// (see TestFiltersAllowLinkedSystemComesFirst), NPC, minimum value,
+// friendly-only, maximum age, so the relay's debug line names one filter even
+// when several would drop the kill.
 func TestFiltersAllowReportsFirstMatch(t *testing.T) {
 	f := killmail.Filters{
 		ExcludeNPC:   true,
@@ -263,5 +264,113 @@ func TestFiltersAllowDecodedPayload(t *testing.T) {
 		if allowed != (wantFilters[i] == "") {
 			t.Errorf("killmail %d: allowed = %v", k.ID, allowed)
 		}
+	}
+}
+
+// The home chain the linked-system scenarios run against: the home system and
+// one system linked to it, with an island elsewhere on the map.
+const (
+	homeSystem   = 31000001
+	linkedSystem = 31000002
+	islandSystem = 31000099
+)
+
+func linkedToHome(id int64) bool { return id == homeSystem || id == linkedSystem }
+
+// Each case is one scenario of the killmail-filtering spec's linked-system
+// filter requirement.
+func TestFiltersAllowLinkedSystem(t *testing.T) {
+	tests := []struct {
+		name        string
+		linked      func(int64) bool
+		systemID    int64
+		wantAllowed bool
+	}{
+		{name: "kill in a linked system", linked: linkedToHome, systemID: linkedSystem, wantAllowed: true},
+		{name: "kill in an unlinked island", linked: linkedToHome, systemID: islandSystem},
+		{name: "kill in the home system", linked: linkedToHome, systemID: homeSystem, wantAllowed: true},
+		{
+			// The predicate is never asked about system 0: an unknown system
+			// cannot be on the home chain.
+			name:     "no system known",
+			linked:   func(int64) bool { return true },
+			systemID: 0,
+		},
+		{name: "no home system, island", systemID: islandSystem, wantAllowed: true},
+		{name: "no home system, unknown system", systemID: 0, wantAllowed: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := killmail.Filters{Linked: tc.linked, Now: fixedClock()}
+			k := killmail.Killmail{ID: 1, KillTime: now, SolarSystemID: tc.systemID}
+
+			allowed, filter := f.Allow(k, killmail.Neutral)
+			wantFilter := ""
+			if !tc.wantAllowed {
+				wantFilter = killmail.FilterUnlinkedSystem
+			}
+			if allowed != tc.wantAllowed || filter != wantFilter {
+				t.Errorf("Allow() = %v, %q; want %v, %q", allowed, filter, tc.wantAllowed, wantFilter)
+			}
+		})
+	}
+}
+
+// The linked-system filter runs before every other one, so a kill in an island
+// is reported as unlinked even when it would also fail the rest.
+func TestFiltersAllowLinkedSystemComesFirst(t *testing.T) {
+	f := killmail.Filters{
+		Linked:     linkedToHome,
+		ExcludeNPC: true,
+		MinValue:   10_000_000,
+		MaxKillAge: time.Hour,
+		Now:        fixedClock(),
+	}
+	k := killmail.Killmail{ID: 1, KillTime: now.Add(-5 * time.Hour), NPC: true, SolarSystemID: islandSystem}
+
+	if allowed, filter := f.Allow(k, killmail.Neutral); allowed || filter != killmail.FilterUnlinkedSystem {
+		t.Fatalf("Allow() = %v, %q; want false, %q", allowed, filter, killmail.FilterUnlinkedSystem)
+	}
+}
+
+// The filter reads the topology as it stands when the killmail is processed:
+// a replayed kill whose system has since been cut off is dropped.
+func TestFiltersAllowLinkedAtProcessingTime(t *testing.T) {
+	linked := map[int64]bool{homeSystem: true, linkedSystem: true}
+	f := killmail.Filters{Linked: func(id int64) bool { return linked[id] }, Now: fixedClock()}
+	k := killmail.Killmail{ID: 1, KillTime: now, SolarSystemID: linkedSystem}
+
+	if allowed, filter := f.Allow(k, killmail.Neutral); !allowed {
+		t.Fatalf("kill in a linked system dropped by %q", filter)
+	}
+
+	delete(linked, linkedSystem)
+	if allowed, filter := f.Allow(k, killmail.Neutral); allowed || filter != killmail.FilterUnlinkedSystem {
+		t.Errorf("after the system is cut off, Allow() = %v, %q; want false, %q",
+			allowed, filter, killmail.FilterUnlinkedSystem)
+	}
+}
+
+// The system the filter checks is the one the decoder settled on, which falls
+// back to the payload's when an entry has none.
+func TestFiltersAllowLinkedSystemFromPayload(t *testing.T) {
+	payload := `{"type":"killmail_update","solar_system_id":31000002,"killmails":[
+		{"killmail_id":1,"kill_time":"2026-10-13T18:44:00Z"},
+		{"killmail_id":2,"kill_time":"2026-10-13T18:44:00Z","solar_system_id":31000099}]}`
+
+	log, _ := testLogger()
+	kills := killmail.Extract([]byte(payload), log)
+	if len(kills) != 2 {
+		t.Fatalf("got %d killmails, want 2", len(kills))
+	}
+
+	f := killmail.Filters{Linked: linkedToHome, Now: fixedClock()}
+	if allowed, filter := f.Allow(kills[0], killmail.Neutral); !allowed {
+		t.Errorf("killmail with the payload's linked system dropped by %q", filter)
+	}
+	if allowed, filter := f.Allow(kills[1], killmail.Neutral); allowed || filter != killmail.FilterUnlinkedSystem {
+		t.Errorf("killmail in its own island system: Allow() = %v, %q; want false, %q",
+			allowed, filter, killmail.FilterUnlinkedSystem)
 	}
 }

@@ -2,12 +2,15 @@
 // turns one SSE event into posted Discord messages and advances the cursor the
 // stream resumes from.
 //
-// Handle is what internal/wanderer calls for every map_kill event, in stream
-// order. For each killmail the event carries it skips the ones already posted,
-// applies the filters, resolves the system name, renders the embed and posts
-// it, recording the kill as posted only once Discord has accepted it. Once the
-// whole event is handled — and not before — the cursor moves to the event's ID
-// and the state is written to disk.
+// Handle is what internal/wanderer calls for every event, in stream order, and
+// it dispatches on the event type. For each killmail a map_kill event carries
+// it skips the ones already posted, applies the filters, resolves the system
+// name, renders the embed and posts it, recording the kill as posted only once
+// Discord has accepted it. A topology event (deleted_system, connection_added,
+// connection_removed) goes to the [Topology], when one is configured, which
+// keeps the map graph the linked-system filter reads. Once the whole event is
+// handled — and not before — the cursor moves to the event's ID and the state
+// is written to disk, whatever the event's type.
 //
 // That order is what makes the relay at-least-once on the stream and
 // at-most-once on Discord: a crash halfway through an event replays the event
@@ -15,13 +18,14 @@
 // the kills that already went out. See the "Processing order and cursor
 // semantics" section of openspec/changes/archive/2026-10-14-add-killmail-relay-bot/design.md.
 //
-// The relay composes the other packages through the three interfaces below,
+// The relay composes the other packages through the interfaces below,
 // which it declares itself, so its pipeline can be tested with fakes and
 // without a network.
 package relay
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -37,6 +41,15 @@ import (
 // name themselves; duplicate suppression lives here, since it is the state,
 // not a filter, that remembers.
 const FilterDuplicate = "duplicate"
+
+// Wanderer's SSE event types that change the map topology. Handle passes them
+// to the [Topology]; the wiring subscribes to them, alongside
+// [killmail.EventMapKill], only when a home system is configured.
+const (
+	EventDeletedSystem     = "deleted_system"
+	EventConnectionAdded   = "connection_added"
+	EventConnectionRemoved = "connection_removed"
+)
 
 // Poster posts one rendered killmail to the Discord channel.
 //
@@ -69,11 +82,21 @@ type Store interface {
 	Save() error
 }
 
+// Topology is the map graph the linked-system filter reads, kept current from
+// the stream's topology events.
+//
+// It is internal/topology's graph. Apply decodes the payload itself and logs
+// and ignores one it cannot use, so it cannot fail the event.
+type Topology interface {
+	Apply(eventType string, payload json.RawMessage)
+}
+
 // Relay is the pipeline. The zero value is not usable; call [New].
 type Relay struct {
 	poster   Poster
 	resolver Resolver
 	store    Store
+	topology Topology
 
 	friendlies killmail.Friendlies
 	filters    killmail.Filters
@@ -82,6 +105,7 @@ type Relay struct {
 }
 
 type options struct {
+	topology   Topology
 	friendlies killmail.Friendlies
 	filters    killmail.Filters
 	logger     *slog.Logger
@@ -101,6 +125,12 @@ func WithFriendlies(f killmail.Friendlies) Option {
 // zero value posts every killmail; the relay's configured defaults differ.
 func WithFilters(f killmail.Filters) Option {
 	return func(o *options) { o.filters = f }
+}
+
+// WithTopology sets the graph topology events are applied to. Without one,
+// topology events are ignored, though they still advance the cursor.
+func WithTopology(t Topology) Option {
+	return func(o *options) { o.topology = t }
 }
 
 // WithLogger sets the logger the pipeline reports on. A nil logger keeps
@@ -144,6 +174,7 @@ func New(poster Poster, resolver Resolver, store Store, opts ...Option) (*Relay,
 		poster:     poster,
 		resolver:   resolver,
 		store:      store,
+		topology:   o.topology,
 		friendlies: o.friendlies,
 		filters:    o.filters,
 		logger:     o.logger,
@@ -165,27 +196,31 @@ func (r *Relay) Handler(ctx context.Context) func(wanderer.Envelope) error {
 // work: a fatal Discord error, or ctx being done. In both cases the cursor is
 // left where it was, so the event is replayed on the next run. Everything
 // else — an event carrying no kills, a malformed entry, a filtered kill, a
-// killmail Discord ultimately refused — is logged, and the cursor advances
-// past it so that one bad kill cannot wedge the stream.
+// killmail Discord ultimately refused, a topology event — is logged or
+// applied, and the cursor advances past it so that one bad kill cannot wedge
+// the stream and a restart does not replay topology already applied.
 func (r *Relay) Handle(ctx context.Context, env wanderer.Envelope) error {
-	for _, k := range r.killmails(env) {
-		if err := r.handle(ctx, k); err != nil {
-			return err
+	switch env.Type {
+	case killmail.EventMapKill:
+		for _, k := range killmail.Extract(env.Payload, r.logger) {
+			if err := r.handle(ctx, k); err != nil {
+				return err
+			}
 		}
+	case EventDeletedSystem, EventConnectionAdded, EventConnectionRemoved:
+		if r.topology == nil {
+			r.logger.Debug("ignoring topology event without a home system",
+				"event_id", env.ID, "event_type", env.Type)
+			break
+		}
+		r.topology.Apply(env.Type, env.Payload)
+	default:
+		// The subscription names only the types above, so anything else is a
+		// stream the relay does not understand rather than one it is dropping.
+		r.logger.Debug("ignoring event", "event_id", env.ID, "event_type", env.Type)
 	}
 	r.advance(env.ID)
 	return nil
-}
-
-// killmails decodes the killmails env carries, in payload order.
-func (r *Relay) killmails(env wanderer.Envelope) []killmail.Killmail {
-	if env.Type != killmail.EventMapKill {
-		// Run only subscribes to map_kill, so anything else is a stream the
-		// relay does not understand rather than a kill it is dropping.
-		r.logger.Debug("ignoring event", "event_id", env.ID, "event_type", env.Type)
-		return nil
-	}
-	return killmail.Extract(env.Payload, r.logger)
 }
 
 // handle runs one killmail through dedupe, the filters and Discord.

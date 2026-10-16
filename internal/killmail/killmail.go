@@ -66,13 +66,15 @@ type Killmail struct {
 // Extract decodes a `map_kill` payload and returns its killmails in payload
 // order. Payloads of any type other than PayloadKillmailUpdate, kill counts
 // included, yield no killmails. An entry without an integer `killmail_id` is
-// skipped with a warning, and the remaining entries are still returned.
+// skipped with a warning, and the remaining entries are still returned. An
+// entry without a `solar_system_id` takes the payload's top-level one.
 func Extract(payload []byte, log *slog.Logger) []Killmail {
 	log = orDefault(log)
 
 	var p struct {
-		Type      string            `json:"type"`
-		Killmails []json.RawMessage `json:"killmails"`
+		Type          string            `json:"type"`
+		SolarSystemID json.RawMessage   `json:"solar_system_id"`
+		Killmails     []json.RawMessage `json:"killmails"`
 	}
 	if err := json.Unmarshal(payload, &p); err != nil {
 		log.Warn("ignoring unparseable map_kill payload", "error", err)
@@ -83,11 +85,18 @@ func Extract(payload []byte, log *slog.Logger) []Killmail {
 		return nil
 	}
 
+	// The payload names the system its kills happened in; an entry's own
+	// solar_system_id still wins when it has one.
+	systemID := fieldInt(map[string]json.RawMessage{"solar_system_id": p.SolarSystemID},
+		"solar_system_id")
 	kills := make([]Killmail, 0, len(p.Killmails))
 	for i, raw := range p.Killmails {
 		k, ok := decode(raw, i, log)
 		if !ok {
 			continue
+		}
+		if k.SolarSystemID == 0 {
+			k.SolarSystemID = systemID
 		}
 		kills = append(kills, k)
 	}
