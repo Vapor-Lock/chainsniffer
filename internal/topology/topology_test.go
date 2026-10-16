@@ -367,9 +367,25 @@ func TestConcurrentUse(t *testing.T) {
 	for id := int64(1); id <= 20; id++ {
 		events = append(events, [3]json.RawMessage{added(t, home, id), removed(t, home, id), deleted(t, id)})
 	}
+	var renames []json.RawMessage
+	for id := int64(1); id <= 20; id++ {
+		renames = append(renames, metadata(t, id, fmt.Sprintf("A%d", id)), metadata(t, id, nil))
+	}
 
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(5)
+	go func() {
+		defer wg.Done()
+		for i := range 400 {
+			g.Apply(topology.EventSystemMetadataChanged, renames[i%len(renames)])
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := range 2000 {
+			g.Alias(int64(i % 25))
+		}
+	}()
 	go func() {
 		defer wg.Done()
 		for i := range 200 {
@@ -397,4 +413,283 @@ func TestConcurrentUse(t *testing.T) {
 
 	g.Install(snapshot([2]int64{home, a}))
 	assertLinked(t, g, map[int64]bool{home: true, a: true, 5: false})
+	assertAlias(t, g, 5, "")
+}
+
+// j134349 is the system the system_metadata_changed fixture names HOTEL.
+const j134349 int64 = 31001234
+
+// metadata returns the system_metadata_changed fixture for id with
+// temporary_name set to name, or null when name is nil.
+func metadata(t *testing.T, id int64, name any) json.RawMessage {
+	t.Helper()
+	var fields map[string]any
+	if err := json.Unmarshal(fixture(t, "system_metadata_changed.json"), &fields); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	fields["solar_system_id"] = id
+	fields["temporary_name"] = name
+	out, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// aliased returns a graph whose snapshot gives the systems these aliases.
+func aliased(t *testing.T, home int64, aliases map[int64]string) (*topology.Graph, *bytes.Buffer) {
+	t.Helper()
+	log, buf := testLogger()
+	g := topology.New(home, topology.WithLogger(log))
+	s := snapshot([2]int64{home, j134349})
+	s.Aliases = aliases
+	g.Install(s)
+	return g, buf
+}
+
+func assertAlias(t *testing.T, g *topology.Graph, id int64, want string) {
+	t.Helper()
+	if got := g.Alias(id); got != want {
+		t.Errorf("Alias(%d) = %q, want %q", id, got, want)
+	}
+}
+
+func TestAliasesTrackedForEveryMap(t *testing.T) {
+	for _, h := range []int64{home, 0} {
+		t.Run(fmt.Sprintf("home %d", h), func(t *testing.T) {
+			g, _ := aliased(t, h, map[int64]string{j134349: "HOTEL"})
+			assertAlias(t, g, j134349, "HOTEL")
+			g.Apply(topology.EventSystemMetadataChanged, metadata(t, j134349, "INDIA"))
+			assertAlias(t, g, j134349, "INDIA")
+		})
+	}
+}
+
+func TestAliasesFromSnapshot(t *testing.T) {
+	t.Run("snapshot names a system", func(t *testing.T) {
+		g, _ := aliased(t, home, map[int64]string{j134349: "HOTEL"})
+		assertAlias(t, g, j134349, "HOTEL")
+	})
+	t.Run("snapshot clears a stale alias", func(t *testing.T) {
+		g, _ := aliased(t, home, map[int64]string{j134349: "HOTEL"})
+		g.Install(snapshot([2]int64{home, j134349}))
+		assertAlias(t, g, j134349, "")
+	})
+	t.Run("blank temporary name", func(t *testing.T) {
+		g, _ := aliased(t, home, map[int64]string{j134349: "  "})
+		assertAlias(t, g, j134349, "")
+	})
+	t.Run("value is trimmed", func(t *testing.T) {
+		g, _ := aliased(t, home, map[int64]string{j134349: " HOTEL\n"})
+		assertAlias(t, g, j134349, "HOTEL")
+	})
+	t.Run("system without an alias", func(t *testing.T) {
+		g, _ := aliased(t, home, map[int64]string{j134349: "HOTEL"})
+		assertAlias(t, g, a, "")
+	})
+}
+
+func TestAliasChangesFromStream(t *testing.T) {
+	t.Run("fixture payload", func(t *testing.T) {
+		g := topology.New(home)
+		g.Apply(topology.EventSystemMetadataChanged, fixture(t, "system_metadata_changed.json"))
+		assertAlias(t, g, j134349, "HOTEL")
+	})
+	t.Run("temporary name set after the system is linked", func(t *testing.T) {
+		g, _ := aliased(t, home, nil)
+		g.Apply(topology.EventSystemMetadataChanged, metadata(t, j134349, "HOTEL"))
+		assertAlias(t, g, j134349, "HOTEL")
+	})
+	t.Run("temporary name renamed", func(t *testing.T) {
+		g, _ := aliased(t, home, map[int64]string{j134349: "HOTEL"})
+		g.Apply(topology.EventSystemMetadataChanged, metadata(t, j134349, "INDIA"))
+		assertAlias(t, g, j134349, "INDIA")
+	})
+	for name, value := range map[string]any{"null": nil, "blank": " \t", "empty": ""} {
+		t.Run("temporary name cleared: "+name, func(t *testing.T) {
+			g, _ := aliased(t, home, map[int64]string{j134349: "HOTEL"})
+			g.Apply(topology.EventSystemMetadataChanged, metadata(t, j134349, value))
+			assertAlias(t, g, j134349, "")
+		})
+	}
+	t.Run("temporary name missing", func(t *testing.T) {
+		g, _ := aliased(t, home, map[int64]string{j134349: "HOTEL"})
+		g.Apply(topology.EventSystemMetadataChanged,
+			json.RawMessage(`{"solar_system_id": 31001234, "status": 2}`))
+		assertAlias(t, g, j134349, "")
+	})
+	t.Run("other metadata changes", func(t *testing.T) {
+		g, buf := aliased(t, home, map[int64]string{j134349: "HOTEL"})
+		buf.Reset()
+		var fields map[string]any
+		if err := json.Unmarshal(metadata(t, j134349, "HOTEL"), &fields); err != nil {
+			t.Fatal(err)
+		}
+		fields["status"] = 3
+		fields["labels"] = `{"customLabel":"","labels":["la"]}`
+		payload, _ := json.Marshal(fields)
+		g.Apply(topology.EventSystemMetadataChanged, payload)
+		assertAlias(t, g, j134349, "HOTEL")
+		if buf.Len() != 0 {
+			t.Errorf("logged for an unchanged alias:\n%s", buf)
+		}
+	})
+	t.Run("system removed from the map", func(t *testing.T) {
+		g, _ := aliased(t, home, map[int64]string{j134349: "HOTEL"})
+		g.Apply(topology.EventDeletedSystem, deleted(t, j134349))
+		assertAlias(t, g, j134349, "")
+	})
+	t.Run("metadata leaves the connections alone", func(t *testing.T) {
+		g, _ := aliased(t, home, nil)
+		g.Apply(topology.EventSystemMetadataChanged, metadata(t, j134349, "HOTEL"))
+		assertLinked(t, g, map[int64]bool{j134349: true})
+	})
+}
+
+func TestMalformedMetadataEvent(t *testing.T) {
+	cases := []struct{ name, payload string }{
+		{"missing system", `{"temporary_name": "INDIA"}`},
+		{"string system", `{"solar_system_id": "J134349", "temporary_name": "INDIA"}`},
+		{"null system", `{"solar_system_id": null, "temporary_name": "INDIA"}`},
+		{"numeric name", `{"solar_system_id": 31001234, "temporary_name": 7}`},
+		{"not an object", `["INDIA"]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g, buf := aliased(t, home, map[int64]string{j134349: "HOTEL", a: "ALPHA"})
+			buf.Reset()
+			g.Apply(topology.EventSystemMetadataChanged, json.RawMessage(tc.payload))
+			if !strings.Contains(buf.String(), "level=WARN") {
+				t.Errorf("no warning logged:\n%s", buf)
+			}
+			assertAlias(t, g, j134349, "HOTEL")
+			assertAlias(t, g, a, "ALPHA")
+		})
+	}
+}
+
+func TestAliasChangesDuringSnapshotAreNotLost(t *testing.T) {
+	t.Run("rename while a periodic snapshot is loading", func(t *testing.T) {
+		g, _ := aliased(t, home, map[int64]string{j134349: "HOTEL"})
+		err := g.Resync(context.Background(), func(context.Context) (topology.Snapshot, error) {
+			g.Apply(topology.EventSystemMetadataChanged, metadata(t, j134349, "INDIA"))
+			s := snapshot([2]int64{home, j134349})
+			s.Aliases = map[int64]string{j134349: "HOTEL"}
+			return s, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertAlias(t, g, j134349, "INDIA")
+	})
+	t.Run("clear while a snapshot is loading", func(t *testing.T) {
+		g, _ := aliased(t, home, map[int64]string{j134349: "HOTEL"})
+		g.BeginResync()
+		g.Apply(topology.EventSystemMetadataChanged, metadata(t, j134349, nil))
+		s := snapshot([2]int64{home, j134349})
+		s.Aliases = map[int64]string{j134349: "HOTEL"}
+		g.Install(s)
+		assertAlias(t, g, j134349, "")
+	})
+	t.Run("deletion while a snapshot is loading", func(t *testing.T) {
+		g, _ := aliased(t, home, map[int64]string{j134349: "HOTEL"})
+		g.BeginResync()
+		g.Apply(topology.EventDeletedSystem, deleted(t, j134349))
+		s := snapshot([2]int64{home, j134349})
+		s.Aliases = map[int64]string{j134349: "HOTEL"}
+		g.Install(s)
+		assertAlias(t, g, j134349, "")
+	})
+	t.Run("journal ends with the snapshot", func(t *testing.T) {
+		g, _ := aliased(t, home, nil)
+		g.BeginResync()
+		g.Apply(topology.EventSystemMetadataChanged, metadata(t, j134349, "INDIA"))
+		g.Install(snapshot([2]int64{home, j134349}))
+		g.Install(snapshot([2]int64{home, j134349}))
+		assertAlias(t, g, j134349, "")
+	})
+}
+
+func TestAliasLogging(t *testing.T) {
+	t.Run("snapshot summary", func(t *testing.T) {
+		s := topology.Snapshot{Systems: []int64{home}, Aliases: map[int64]string{}}
+		for i := int64(1); i <= 21; i++ {
+			s.Systems = append(s.Systems, i)
+			s.Connections = append(s.Connections, [2]int64{home, i})
+			if i <= 9 {
+				s.Aliases[i] = fmt.Sprintf("A%d", i)
+			}
+		}
+		s.Aliases[1000] = " " // blank: no alias
+		log, buf := testLogger()
+		g := topology.New(home, topology.WithLogger(log))
+		g.Install(s)
+		out := buf.String()
+		if !strings.Contains(out, "systems=22") || !strings.Contains(out, "aliases=9") {
+			t.Errorf("no info line with 22 systems and 9 aliases:\n%s", out)
+		}
+	})
+	t.Run("alias change is logged at debug", func(t *testing.T) {
+		g, buf := aliased(t, home, nil)
+		buf.Reset()
+		g.Apply(topology.EventSystemMetadataChanged, metadata(t, j134349, "HOTEL"))
+		out := buf.String()
+		if !strings.Contains(out, "level=DEBUG") || !strings.Contains(out, "solar_system_id=31001234") ||
+			!strings.Contains(out, "alias=HOTEL") {
+			t.Errorf("no debug line with the system and alias:\n%s", out)
+		}
+	})
+	t.Run("deleted alias is logged", func(t *testing.T) {
+		g, buf := aliased(t, 0, map[int64]string{j134349: "HOTEL"})
+		buf.Reset()
+		g.Apply(topology.EventDeletedSystem, deleted(t, j134349))
+		if !strings.Contains(buf.String(), "chain alias changed") {
+			t.Errorf("no debug line for the cleared alias:\n%s", buf)
+		}
+	})
+}
+
+func TestHomelessGraph(t *testing.T) {
+	newGraph := func() (*topology.Graph, *bytes.Buffer) {
+		log, buf := testLogger()
+		return topology.New(0, topology.WithLogger(log)), buf
+	}
+	t.Run("snapshot without a warning or linked count", func(t *testing.T) {
+		g, buf := newGraph()
+		g.Install(topology.Snapshot{Systems: []int64{c, d}, Connections: [][2]int64{{c, d}},
+			Aliases: map[int64]string{c: "CHARLIE"}})
+		out := buf.String()
+		if strings.Contains(out, "level=WARN") || strings.Contains(out, "linked_systems") {
+			t.Errorf("home-less snapshot logged a home warning or linked count:\n%s", out)
+		}
+		if !strings.Contains(out, "systems=2") || !strings.Contains(out, "aliases=1") {
+			t.Errorf("no info line with 2 systems and 1 alias:\n%s", out)
+		}
+		assertAlias(t, g, c, "CHARLIE")
+	})
+	t.Run("all topology events apply quietly and link nothing", func(t *testing.T) {
+		g, buf := newGraph()
+		g.Install(topology.Snapshot{Systems: []int64{c, d}, Connections: [][2]int64{{c, d}}})
+		buf.Reset()
+		g.Apply(topology.EventConnectionAdded, added(t, d, a))
+		g.Apply(topology.EventConnectionRemoved, removed(t, c, d))
+		g.Apply(topology.EventDeletedSystem, deleted(t, a))
+		if buf.Len() != 0 {
+			t.Errorf("connection events logged without a home system:\n%s", buf)
+		}
+		assertLinked(t, g, map[int64]bool{0: false, a: false, c: false, d: false})
+	})
+	t.Run("journalled events replay onto a snapshot", func(t *testing.T) {
+		g, buf := newGraph()
+		g.BeginResync()
+		g.Apply(topology.EventConnectionAdded, added(t, c, d))
+		g.Apply(topology.EventSystemMetadataChanged, metadata(t, c, "CHARLIE"))
+		g.Install(topology.Snapshot{Systems: []int64{c, d}})
+		assertAlias(t, g, c, "CHARLIE")
+		if !strings.Contains(buf.String(), "replayed_events=2") {
+			t.Errorf("snapshot did not replay both events:\n%s", buf)
+		}
+		g.Apply(topology.EventDeletedSystem, deleted(t, c))
+		assertAlias(t, g, c, "")
+	})
 }

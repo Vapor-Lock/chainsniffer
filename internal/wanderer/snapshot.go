@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // Snapshot is a map's topology as Wanderer's REST API reports it: the systems
@@ -15,6 +16,10 @@ import (
 type Snapshot struct {
 	// Systems are the solar system IDs of the systems on the map.
 	Systems []int64
+	// TemporaryNames are the systems' Wanderer temporary names (chain
+	// aliases), trimmed, keyed by solar system ID. A system without one, or
+	// with one that is blank, has no entry.
+	TemporaryNames map[int64]string
 	// Connections are the connections between those systems.
 	Connections []Connection
 }
@@ -33,7 +38,8 @@ type Connection struct {
 type wireSnapshot struct {
 	Data *struct {
 		Systems *[]struct {
-			SolarSystemID int64 `json:"solar_system_id"`
+			SolarSystemID int64  `json:"solar_system_id"`
+			TemporaryName string `json:"temporary_name"`
 		} `json:"systems"`
 		Connections *[]struct {
 			Source int64 `json:"solar_system_source"`
@@ -48,7 +54,8 @@ type wireSnapshot struct {
 //
 // A response that no retry can fix — 401, 403, 404 — comes back as a
 // *FatalError; a network error, 429, 5xx or a response of the wrong shape as a
-// plain error worth retrying. Entries without a system ID are skipped.
+// plain error worth retrying. Entries without a system ID are skipped. A null
+// temporary_name reads as none.
 func (c *Client) Snapshot(ctx context.Context) (Snapshot, error) {
 	ctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
 	defer cancel()
@@ -82,12 +89,17 @@ func (c *Client) Snapshot(ctx context.Context) (Snapshot, error) {
 	}
 
 	snapshot := Snapshot{
-		Systems:     make([]int64, 0, len(*wire.Data.Systems)),
-		Connections: make([]Connection, 0, len(*wire.Data.Connections)),
+		Systems:        make([]int64, 0, len(*wire.Data.Systems)),
+		TemporaryNames: make(map[int64]string),
+		Connections:    make([]Connection, 0, len(*wire.Data.Connections)),
 	}
 	for _, system := range *wire.Data.Systems {
-		if system.SolarSystemID != 0 {
-			snapshot.Systems = append(snapshot.Systems, system.SolarSystemID)
+		if system.SolarSystemID == 0 {
+			continue
+		}
+		snapshot.Systems = append(snapshot.Systems, system.SolarSystemID)
+		if name := strings.TrimSpace(system.TemporaryName); name != "" {
+			snapshot.TemporaryNames[system.SolarSystemID] = name
 		}
 	}
 	for _, connection := range *wire.Data.Connections {

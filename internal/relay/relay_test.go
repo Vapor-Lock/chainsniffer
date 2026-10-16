@@ -580,7 +580,7 @@ func (g *fakeTopology) Apply(eventType string, payload json.RawMessage) {
 }
 
 func TestHandleAppliesTopologyEventsAndAdvancesTheCursor(t *testing.T) {
-	for _, eventType := range []string{EventDeletedSystem, EventConnectionAdded, EventConnectionRemoved} {
+	for _, eventType := range []string{EventDeletedSystem, EventConnectionAdded, EventConnectionRemoved, EventSystemMetadataChanged} {
 		t.Run(eventType, func(t *testing.T) {
 			graph := &fakeTopology{}
 			f := newFixture(t, WithTopology(graph))
@@ -649,5 +649,69 @@ func TestHandleDropsKillsInUnlinkedSystems(t *testing.T) {
 	}
 	if f.store.lastEventID != "01JB" {
 		t.Errorf("cursor = %q, want 01JB", f.store.lastEventID)
+	}
+}
+
+// fakeAliases answers chain aliases from a fixed table.
+type fakeAliases map[int64]string
+
+func (a fakeAliases) Alias(id int64) string { return a[id] }
+
+// "Metadata events advance the cursor": a system_metadata_changed event goes
+// to the topology, and the cursor moves past it once it is handled.
+func TestHandleAppliesMetadataEventsAndAdvancesTheCursor(t *testing.T) {
+	graph := &fakeTopology{}
+	f := newFixture(t, WithTopology(graph))
+	graph.store = f.store
+
+	payload := `{"solar_system_id":31000123,"temporary_name":"HOTEL"}`
+	f.handle(t, wanderer.Envelope{ID: "01JD", Type: EventSystemMetadataChanged, Payload: []byte(payload)})
+
+	want := []appliedEvent{{EventSystemMetadataChanged, payload, ""}}
+	if !slices.Equal(graph.applied, want) {
+		t.Errorf("applied = %+v, want %+v", graph.applied, want)
+	}
+	if f.store.lastEventID != "01JD" {
+		t.Errorf("cursor = %q, want 01JD", f.store.lastEventID)
+	}
+}
+
+// "Chain alias": a kill in a system the map names shows the alias after the
+// system name, and the posted-killmail log line carries it.
+func TestHandleRendersTheChainAlias(t *testing.T) {
+	f := newFixture(t, WithAliases(fakeAliases{systemID: "HOTEL"}))
+
+	f.handle(t, envelope(t, "01JB", kill(1)))
+
+	if got, want := f.poster.embeds[0].Fields[0].Value, systemName+" (HOTEL)"; got != want {
+		t.Errorf("system field = %q, want %q", got, want)
+	}
+	if !strings.Contains(f.logs.String(), "chain_alias=HOTEL") {
+		t.Errorf("the posted-killmail log line does not name the alias:\n%s", f.logs)
+	}
+}
+
+// Without an alias, from no Aliases at all or for a system it does not name,
+// the System field is the name alone and the log line has no chain_alias.
+func TestHandleRendersTheNameAloneWithoutAnAlias(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []Option
+	}{
+		{"no aliases", nil},
+		{"system without an alias", []Option{WithAliases(fakeAliases{31000999: "HOTEL"})}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, tc.opts...)
+
+			f.handle(t, envelope(t, "01JB", kill(1)))
+
+			if got := f.poster.embeds[0].Fields[0].Value; got != systemName {
+				t.Errorf("system field = %q, want %q", got, systemName)
+			}
+			if strings.Contains(f.logs.String(), "chain_alias") {
+				t.Errorf("the log names a chain alias for a system without one:\n%s", f.logs)
+			}
+		})
 	}
 }

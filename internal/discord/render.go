@@ -41,20 +41,22 @@ const (
 //
 // systemName is the name resolved for k.SolarSystemID, or its decimal ID when
 // the name could not be resolved (see internal/universe); an empty systemName
-// leaves the System field out.
+// leaves the System field out. alias is the system's chain alias, Wanderer's
+// temporary name for it, which the System field shows in parentheses after
+// the name, as "J134349 (HOTEL)"; an empty alias shows the name alone.
 //
 // Render is a pure function of its arguments — posting lives elsewhere in this
 // package — so the layout is covered by golden tests. Every field of a
 // killmail but its ID is optional (see internal/killmail), so each part of the
 // embed is dropped when the payload did not carry it: the embed always
 // renders, and never shows an empty field or a dangling separator.
-func Render(k killmail.Killmail, c killmail.Classification, systemName string) *discordgo.MessageEmbed {
+func Render(k killmail.Killmail, c killmail.Classification, systemName, alias string) *discordgo.MessageEmbed {
 	embed := &discordgo.MessageEmbed{
 		Type:   discordgo.EmbedTypeRich,
 		Title:  title(k.Victim),
 		URL:    fmt.Sprintf(killURL, k.ID),
 		Color:  color(c),
-		Fields: fields(k, systemName),
+		Fields: fields(k, system(systemName, alias)),
 	}
 	if k.Victim.ShipTypeID > 0 {
 		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
@@ -104,6 +106,35 @@ func footer(c killmail.Classification) string {
 	default:
 		return ""
 	}
+}
+
+// maxAliasLen caps the alias, in characters, well inside Discord's
+// 1024-character field value limit: a field over the limit makes Discord
+// reject the whole embed, and the kill with it.
+const maxAliasLen = 100
+
+// markdownEscaper backslash-escapes the characters Discord reads as markdown,
+// so that an alias like "A_B_" is not italicised.
+var markdownEscaper = strings.NewReplacer(
+	`\`, `\\`,
+	"*", `\*`,
+	"_", `\_`,
+	"~", `\~`,
+	"`", "\\`",
+	"|", `\|`,
+)
+
+// system is the System field's value: the system name, followed by its chain
+// alias in parentheses when it has one. An alias without a name to follow has
+// nothing to annotate and is left out with it.
+func system(name, alias string) string {
+	if name == "" || alias == "" {
+		return name
+	}
+	if r := []rune(alias); len(r) > maxAliasLen {
+		alias = string(r[:maxAliasLen])
+	}
+	return name + " (" + markdownEscaper.Replace(alias) + ")"
 }
 
 // fields builds the inline fields, in the order the design lays them out.

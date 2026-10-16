@@ -24,7 +24,9 @@ Each killmail becomes an embed:
 - **Timestamp:** the kill time Wanderer reported.
 
 System names are resolved through the public ESI endpoint and cached in memory; a lookup that fails
-falls back to the solar system ID.
+falls back to the solar system ID. When the system has a temporary name on the Wanderer map (its
+chain alias), the System field shows it after the name, e.g. `J134349 (HOTEL)`; a system with no
+temporary name shows the name alone.
 
 ## Setup
 
@@ -98,21 +100,23 @@ nothing at all, so that combination is rejected at startup.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `CHAINSNIFFER_HOME_SYSTEM_ID` | unset | EVE solar system ID of the home system, e.g. `31000727`. When set, kills in systems not linked to it are dropped. Must be a positive integer. |
-| `CHAINSNIFFER_TOPOLOGY_RESYNC_INTERVAL` | `15m` | How often the map's topology is reloaded from scratch, as a Go duration. Only used with a home system, but validated either way. |
+| `CHAINSNIFFER_HOME_SYSTEM_ID` | unset | EVE solar system ID of the home system, e.g. `31000727`. When set, kills in systems not linked to it are dropped; unset, no kill is dropped for where it happened. Must be a positive integer. |
+| `CHAINSNIFFER_TOPOLOGY_RESYNC_INTERVAL` | `15m` | How often the map's topology and chain aliases are reloaded from scratch, as a Go duration. |
 
 A system is linked when a path over the map's connections leads to it from the home system,
 following connections in either direction and of any type; the home system itself is always
 linked. Leave `CHAINSNIFFER_HOME_SYSTEM_ID` unset to relay kills from every system on the map.
 
-With a home system set, the relay loads the map's systems and connections from
+The relay always loads the map's systems, connections and temporary names from
 `/api/maps/{map}/systems` (with the same token) every time the stream connects and again every
-resync interval, and follows the stream's connection events in between. Every load logs one info
-line, `loaded map topology`, with the number of `systems` on the map and how many are
-`linked_systems`: if that says 1, the home system ID is probably wrong, and a warning says so when
-the home system isn't on the map at all. A dropped kill logs `filter=unlinked_system` at debug
-level. A 401, 403 or 404 from that endpoint when the stream connects exits 1, as it does for the
-stream.
+resync interval, and follows the stream's connection, system deletion and system metadata events in
+between; the temporary names are the chain aliases shown in the System field. The home system
+only decides whether the linked-system filter applies, so a deployment without one needs that
+endpoint too. Every load logs one info line, `loaded map topology`, with the number of `systems` on
+the map and, with a home system set, how many are `linked_systems`: if that says 1, the home system
+ID is probably wrong, and a warning says so when the home system isn't on the map at all. A dropped
+kill logs `filter=unlinked_system` at debug level. A 401, 403 or 404 from that endpoint when the
+stream connects exits 1, home system or not, as it does for the stream.
 
 ### Runtime
 
@@ -200,12 +204,15 @@ nix run .     # with the variables already in the environment
 - **Kills are judged by the topology when they are processed,** not when they happened. A kill
   Wanderer replays after its system was cut off from home is dropped, and one in a system linked
   after the kill is posted.
-- **Missed topology changes heal within one resync interval.** Wanderer emits no event for a map
-  import or duplication, and an event broadcast while the stream is reconnecting can be lost; the
-  next periodic reload (`CHAINSNIFFER_TOPOLOGY_RESYNC_INTERVAL`) corrects either. A reload that
-  fails logs a warning and keeps the current topology.
+- **Missed topology and alias changes heal within one resync interval.** Wanderer emits no event
+  for a map import or duplication, nor for a system copied between maps with its temporary name,
+  and an event broadcast while the stream is reconnecting can be lost; the next periodic reload
+  (`CHAINSNIFFER_TOPOLOGY_RESYNC_INTERVAL`) corrects any of these. A reload that fails logs a
+  warning and keeps the current topology and aliases.
+- **Posts are never edited.** The alias in the System field is the one known when the kill is
+  posted. A system named or renamed afterwards shows its new alias on later kills only.
 - **The bot only writes.** No slash commands, no reading messages, and no map events other than
-  kills and, with a home system set, connection changes.
+  kills, connection changes, system deletions and system metadata changes.
 - **No enrichment.** Posts carry what Wanderer sent, plus the system name from ESI. Nothing is
   fetched from zKillboard or ESI's killmail endpoints.
 

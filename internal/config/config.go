@@ -92,9 +92,10 @@ type Config struct {
 
 	// Home chain. HomeSystemID is the EVE solar system ID kills are judged
 	// against: a kill in a system with no path to it over the map's
-	// connections is dropped. Zero means unset, in which case the relay
-	// neither loads nor follows the map's topology. TopologyResyncInterval is
-	// how often the topology is reloaded from scratch while following it.
+	// connections is dropped. Zero means unset, in which case no kill is
+	// dropped for where it happened; the map's topology, and the chain aliases
+	// with it, is followed either way. TopologyResyncInterval is how often
+	// that topology is reloaded from scratch.
 	HomeSystemID           int64
 	TopologyResyncInterval time.Duration
 
@@ -159,9 +160,10 @@ func Load(lookup LookupFunc) (*Config, error) {
 
 // LogValue implements slog.LogValuer, so logging a Config writes a summary of
 // the effective settings with both tokens redacted. This is the summary
-// cmd/chainsniffer logs at startup.
+// cmd/chainsniffer logs at startup. The home system is left out when none is
+// configured, rather than logged as 0.
 func (c *Config) LogValue() slog.Value {
-	return slog.GroupValue(
+	attrs := []slog.Attr{
 		slog.String("wanderer_url", c.WandererURL),
 		slog.String("wanderer_map", c.WandererMap),
 		slog.String("wanderer_token", c.WandererToken.String()),
@@ -173,12 +175,17 @@ func (c *Config) LogValue() slog.Value {
 		slog.Bool("exclude_npc", c.ExcludeNPC),
 		slog.Float64("min_value", c.MinValue),
 		slog.Duration("max_kill_age", c.MaxKillAge),
-		slog.Int64("home_system_id", c.HomeSystemID),
+	}
+	if c.HomeSystemID != 0 {
+		attrs = append(attrs, slog.Int64("home_system_id", c.HomeSystemID))
+	}
+	attrs = append(attrs,
 		slog.Duration("topology_resync_interval", c.TopologyResyncInterval),
 		slog.String("state_dir", c.StateDir),
 		slog.String("log_level", c.LogLevel.String()),
 		slog.String("log_format", string(c.LogFormat)),
 	)
+	return slog.GroupValue(attrs...)
 }
 
 // Error reports everything wrong with the environment at once.

@@ -16,8 +16,8 @@ import (
 const snapshotFixture = `{"data":{
 	"systems":[
 		{"id":"5b1d","map_id":"f1b0","solar_system_id":31002604,"name":"J142845","original_name":"J142845","custom_name":null,"temporary_name":null,"description":null,"tag":null,"labels":null,"locked":false,"visible":true,"status":0,"position_x":0,"position_y":0,"inserted_at":"2026-10-01T10:00:00Z","updated_at":"2026-10-01T10:00:00Z"},
-		{"id":"5b1e","map_id":"f1b0","solar_system_id":30000142,"name":"Jita","original_name":"Jita","visible":true},
-		{"id":"5b1f","map_id":"f1b0","solar_system_id":31000005,"name":"Thera","original_name":"Thera","visible":true}
+		{"id":"5b1e","map_id":"f1b0","solar_system_id":30000142,"name":"Jita","original_name":"Jita","temporary_name":"  ","visible":true},
+		{"id":"5b1f","map_id":"f1b0","solar_system_id":31000005,"name":"Thera","original_name":"Thera","temporary_name":" HOTEL ","visible":true}
 	],
 	"connections":[
 		{"id":"c1","map_id":"f1b0","solar_system_source":31002604,"solar_system_target":30000142,"mass_status":0,"time_status":0,"ship_size_type":2,"type":0,"wormhole_type":"K162","locked":false,"inserted_at":"2026-10-01T10:00:00Z","updated_at":"2026-10-01T10:00:00Z"},
@@ -37,7 +37,8 @@ func TestSnapshotRequestsAndDecodesTheMapSystems(t *testing.T) {
 	}
 
 	want := wanderer.Snapshot{
-		Systems: []int64{31002604, 30000142, 31000005},
+		Systems:        []int64{31002604, 30000142, 31000005},
+		TemporaryNames: map[int64]string{31000005: "HOTEL"},
 		Connections: []wanderer.Connection{
 			{Source: 31002604, Target: 30000142},
 			{Source: 30000142, Target: 31000005},

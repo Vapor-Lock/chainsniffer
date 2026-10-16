@@ -714,6 +714,26 @@ func TestConfigLogValueIncludesTopology(t *testing.T) {
 	}
 }
 
+func TestConfigLogValueOmitsUnsetHomeSystem(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := config.Load(lookup(baseEnv()))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	var buf bytes.Buffer
+	slog.New(slog.NewTextHandler(&buf, nil)).Info("starting", "config", cfg)
+
+	line := buf.String()
+	if strings.Contains(line, "home_system_id") {
+		t.Errorf("log line %q mentions home_system_id without a home system", line)
+	}
+	if !strings.Contains(line, "topology_resync_interval=15m0s") {
+		t.Errorf("log line %q does not contain the resync interval", line)
+	}
+}
+
 func TestSecretRedaction(t *testing.T) {
 	t.Parallel()
 
