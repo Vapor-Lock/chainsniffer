@@ -7,8 +7,8 @@
 //
 //	0  a clean shutdown on SIGINT or SIGTERM
 //	1  a failure an operator has to look at: a rejected token, a channel the
-//	   bot cannot post to, a map whose stream Wanderer refuses, an unusable
-//	   state directory
+//	   bot cannot post to, a map whose stream or topology Wanderer refuses,
+//	   an unusable state directory
 //	2  a configuration the relay refuses to start with, with every bad
 //	   variable named on standard error
 //
@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"github.com/Vapor-Lock/chainsniffer/internal/killmail"
 	"github.com/Vapor-Lock/chainsniffer/internal/relay"
 	"github.com/Vapor-Lock/chainsniffer/internal/state"
+	"github.com/Vapor-Lock/chainsniffer/internal/topology"
 	"github.com/Vapor-Lock/chainsniffer/internal/universe"
 	"github.com/Vapor-Lock/chainsniffer/internal/wanderer"
 )
@@ -144,30 +146,109 @@ func serve(ctx context.Context, logger *slog.Logger, cfg *config.Config, o optio
 		return stop(logger, store, streamCtx, fmt.Errorf("the Discord startup check failed: %w", err))
 	}
 
-	relayer, err := relay.New(poster, newResolver(logger, o), store,
+	filters := killmail.Filters{
+		ExcludeNPC:   cfg.ExcludeNPC,
+		MinValue:     cfg.MinValue,
+		FriendlyOnly: cfg.FriendlyOnly,
+		MaxKillAge:   cfg.MaxKillAge,
+	}
+	relayOpts := []relay.Option{
 		relay.WithFriendlies(killmail.NewFriendlies(cfg.FriendlyCorpIDs, cfg.FriendlyAllianceIDs)),
-		relay.WithFilters(killmail.Filters{
-			ExcludeNPC:   cfg.ExcludeNPC,
-			MinValue:     cfg.MinValue,
-			FriendlyOnly: cfg.FriendlyOnly,
-			MaxKillAge:   cfg.MaxKillAge,
-		}),
-		relay.WithLogger(logger))
+		relay.WithLogger(logger),
+	}
+	clientOpts := []wanderer.Option{wanderer.WithLogger(logger)}
+
+	// Without a home system none of the topology is wired: the stream asks
+	// for kills only, and /systems is never requested.
+	var (
+		graph  *topology.Graph
+		client *wanderer.Client
+	)
+	if cfg.HomeSystemID != 0 {
+		graph = topology.New(cfg.HomeSystemID, topology.WithLogger(logger))
+		filters.Linked = graph.Linked
+		relayOpts = append(relayOpts, relay.WithTopology(graph))
+		// The snapshot on connect runs before the connection's first event
+		// is handled, so no kill is judged against a topology that has not
+		// been loaded. Its errors are the client's to classify: a
+		// *wanderer.FatalError ends the run, anything else reconnects.
+		clientOpts = append(clientOpts,
+			wanderer.WithEventTypes(append([]string{wanderer.EventMapKill}, topology.EventTypes...)...),
+			wanderer.WithConnectHook(func(ctx context.Context) error {
+				return graph.Resync(ctx, snapshotFetcher(client))
+			}))
+	}
+	relayOpts = append(relayOpts, relay.WithFilters(filters))
+
+	relayer, err := relay.New(poster, newResolver(logger, o), store, relayOpts...)
 	if err != nil {
 		logger.Error("cannot build the relay", "error", err)
 		return exitFailure
 	}
 
-	client, err := wanderer.New(cfg.WandererURL, cfg.WandererMap, cfg.WandererToken.Reveal(),
-		wanderer.WithLogger(logger))
+	client, err = wanderer.New(cfg.WandererURL, cfg.WandererMap, cfg.WandererToken.Reveal(), clientOpts...)
 	if err != nil {
 		logger.Error("cannot build the Wanderer client", "error", err)
 		return exitFailure
 	}
 
+	if graph != nil {
+		resyncCtx, stopResync := context.WithCancel(streamCtx)
+		var resyncing sync.WaitGroup
+		resyncing.Add(1)
+		go func() {
+			defer resyncing.Done()
+			resync(resyncCtx, logger, graph, snapshotFetcher(client), cfg.TopologyResyncInterval)
+		}()
+		defer func() {
+			stopResync()
+			resyncing.Wait()
+		}()
+	}
+
 	// store.LastEventID is read before every connection attempt, so a
 	// reconnect resumes from the newest event the relay has finished.
 	return stop(logger, store, streamCtx, client.Run(streamCtx, store.LastEventID, relayer.Handler(postCtx)))
+}
+
+// snapshotFetcher loads the map's topology through client, in the shape the
+// graph installs.
+func snapshotFetcher(client *wanderer.Client) func(context.Context) (topology.Snapshot, error) {
+	return func(ctx context.Context) (topology.Snapshot, error) {
+		s, err := client.Snapshot(ctx)
+		if err != nil {
+			return topology.Snapshot{}, err
+		}
+		out := topology.Snapshot{
+			Systems:     s.Systems,
+			Connections: make([][2]int64, 0, len(s.Connections)),
+		}
+		for _, c := range s.Connections {
+			out.Connections = append(out.Connections, [2]int64{c.Source, c.Target})
+		}
+		return out, nil
+	}
+}
+
+// resync reloads the topology every interval until ctx ends, healing any
+// change the stream's events missed. A failed reload, fatal or not, is only a
+// warning: the graph keeps its current topology, and the next connection's
+// snapshot is where a rejected token stops the relay.
+func resync(ctx context.Context, logger *slog.Logger, graph *topology.Graph,
+	fetch func(context.Context) (topology.Snapshot, error), interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if err := graph.Resync(ctx, fetch); err != nil && ctx.Err() == nil {
+			logger.Warn("reloading the map topology failed, keeping the current one",
+				"interval", interval, "error", err)
+		}
+	}
 }
 
 // stop reports how the run ended: a shutdown asked for from the outside is a

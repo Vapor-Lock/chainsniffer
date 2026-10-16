@@ -1,5 +1,5 @@
 // Package wanderer subscribes to one Wanderer map's Server-Sent Events stream
-// and hands its kill events to a handler.
+// and hands the events it subscribed to to a handler.
 //
 // A Client owns the connection: it builds the authenticated request, keeps the
 // stream open, reconnects with exponential backoff, resumes where it left off
@@ -15,6 +15,10 @@
 // "connected". internal/sse does the framing; this package owns the connection
 // loop because Wanderer resumes a stream with a query parameter instead of the
 // Last-Event-ID header the event stream format prescribes.
+//
+// A connect hook, set with WithConnectHook, runs on every connection before any
+// of its events is handled; Snapshot, which reads the map's systems and
+// connections from Wanderer's REST API, is what it is for.
 package wanderer
 
 import (
@@ -27,6 +31,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -34,13 +39,22 @@ import (
 	"github.com/Vapor-Lock/chainsniffer/internal/sse"
 )
 
-// Event types on the stream. The client subscribes to EventMapKill only, so
-// EventConnected is the only other type Wanderer is expected to send.
+// Event types on the stream. The client subscribes to EventMapKill unless
+// WithEventTypes says otherwise; EventConnected arrives on every connection
+// whatever the subscription.
 const (
-	// EventConnected is the type of the first event on every connection.
+	// EventConnected is the type of the first event on every connection. It
+	// never reaches the handler.
 	EventConnected = "connected"
 	// EventMapKill is the event type carrying kill payloads.
 	EventMapKill = "map_kill"
+	// EventConnectionAdded reports a connection added between two systems.
+	EventConnectionAdded = "connection_added"
+	// EventConnectionRemoved reports a connection removed between two systems.
+	EventConnectionRemoved = "connection_removed"
+	// EventDeletedSystem reports a system removed from the map, together with
+	// its connections, for which Wanderer sends no EventConnectionRemoved.
+	EventDeletedSystem = "deleted_system"
 )
 
 // Defaults for the connection loop, all overridable with options.
@@ -58,12 +72,25 @@ const (
 	DefaultStaleTimeout = 90 * time.Second
 )
 
-// Client streams one map's kill events. Use New to build one; a Client is safe
-// to use from one Run at a time.
+// snapshotTimeout bounds one snapshot request. The connect hook runs with the
+// staleness watchdog paused, so a request that hangs would otherwise hold the
+// stream forever.
+const snapshotTimeout = 30 * time.Second
+
+// maxSnapshotBody bounds how much of a snapshot response is decoded. A map's
+// systems and connections come to tens of kilobytes.
+const maxSnapshotBody = 32 << 20
+
+// Client streams one map's events. Use New to build one; a Client is safe to
+// use from one Run at a time, and Snapshot may be called alongside it.
 type Client struct {
-	stream url.URL // the stream endpoint, without a query
-	mapID  string
-	token  string
+	stream  url.URL // the stream endpoint, without a query
+	systems url.URL // the systems endpoint the snapshot comes from
+	mapID   string
+	token   string
+
+	eventTypes  []string
+	connectHook func(context.Context) error
 
 	httpClient *http.Client
 	logger     *slog.Logger
@@ -76,6 +103,8 @@ type Client struct {
 }
 
 type options struct {
+	eventTypes   []string
+	connectHook  func(context.Context) error
 	httpClient   *http.Client
 	logger       *slog.Logger
 	minBackoff   time.Duration
@@ -88,7 +117,34 @@ type options struct {
 // An Option configures a Client at New time.
 type Option func(*options)
 
-// WithHTTPClient sets the client used for the stream requests. The client must
+// WithEventTypes sets the event types to subscribe to, which are sent as the
+// stream request's events parameter and are the types that reach the handler.
+// The default is EventMapKill alone. Empty types are ignored, and so is a call
+// that leaves none.
+func WithEventTypes(types ...string) Option {
+	return func(o *options) {
+		var kept []string
+		for _, t := range types {
+			if t = strings.TrimSpace(t); t != "" && !slices.Contains(kept, t) {
+				kept = append(kept, t)
+			}
+		}
+		if len(kept) > 0 {
+			o.eventTypes = kept
+		}
+	}
+}
+
+// WithConnectHook sets a function Run calls on every connection when its
+// connected event arrives, before it reads the next event. See Run for how
+// its errors are treated.
+func WithConnectHook(hook func(ctx context.Context) error) Option {
+	return func(o *options) {
+		o.connectHook = hook
+	}
+}
+
+// WithHTTPClient sets the client used for the stream and snapshot requests. The client must
 // not have a Timeout, since that would also bound the lifetime of a healthy
 // stream; use WithStaleTimeout to bound silence instead.
 func WithHTTPClient(h *http.Client) Option {
@@ -181,6 +237,7 @@ func New(baseURL, mapID, token string, opts ...Option) (*Client, error) {
 	}
 
 	o := options{
+		eventTypes:   []string{EventMapKill},
 		httpClient:   &http.Client{},
 		logger:       slog.Default(),
 		minBackoff:   DefaultMinBackoff,
@@ -198,8 +255,11 @@ func New(baseURL, mapID, token string, opts ...Option) (*Client, error) {
 
 	return &Client{
 		stream:       *parsed.JoinPath("api", "maps", mapID, "events", "stream"),
+		systems:      *parsed.JoinPath("api", "maps", mapID, "systems"),
 		mapID:        mapID,
 		token:        token,
+		eventTypes:   o.eventTypes,
+		connectHook:  o.connectHook,
 		httpClient:   o.httpClient,
 		logger:       o.logger,
 		minBackoff:   o.minBackoff,
@@ -210,7 +270,7 @@ func New(baseURL, mapID, token string, opts ...Option) (*Client, error) {
 	}, nil
 }
 
-// Run streams kill events until ctx is done, a response turns out to be fatal,
+// Run streams the subscribed events until ctx is done, a response turns out to be fatal,
 // or handle fails.
 //
 // cursor is read before every connection attempt and supplies the ID of the
@@ -220,14 +280,23 @@ func New(baseURL, mapID, token string, opts ...Option) (*Client, error) {
 // resumes from the newest processed event rather than from where the previous
 // connection started.
 //
-// handle is called synchronously for every map_kill event, in stream order, so
+// handle is called synchronously for every event of a subscribed type, in
+// stream order, so
 // a slow handler applies backpressure to the stream instead of queueing up
 // behind it. While it runs, the staleness watchdog is paused: it measures the
 // server's silence, not the relay's own work. A handler error ends Run, since
 // it means the relay itself, not the connection, is broken.
 //
+// The connect hook, when one is set, runs when a connection's connected event
+// arrives and before any of that connection's events is handled, with the
+// watchdog paused as for the handler. An error from it ends the connection,
+// which is retried with backoff as a connection that never became healthy; a
+// *FatalError from it ends Run. The connected event itself never reaches the
+// handler, so its ID never becomes the cursor.
+//
 // Run returns ctx.Err() on a clean shutdown, a *FatalError for a response that
-// retrying cannot fix, or the handler's error. Every other failure — a network
+// retrying cannot fix, from the server or the connect hook, or the handler's
+// error. Every other failure — a network
 // error, the end of a stream, 429, 5xx, a silent connection — is logged and
 // retried with backoff, so Run does not return for those.
 func (c *Client) Run(ctx context.Context, cursor func() string, handle func(Envelope) error) error {
@@ -307,7 +376,7 @@ func (c *Client) connect(ctx context.Context, cursor string, handle func(Envelop
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return false, statusError(resp)
+		return false, statusError(resp, requestStream)
 	}
 
 	healthy := false
@@ -328,8 +397,24 @@ func (c *Client) connect(ctx context.Context, cursor string, handle func(Envelop
 			}
 		}
 
-		switch event.Type {
-		case EventMapKill:
+		switch {
+		case event.Type == EventConnected:
+			c.logger.Info("subscribed to the Wanderer map event stream",
+				"map", c.mapID, "url", c.stream.String(), "events", strings.Join(c.eventTypes, ","),
+				"last_event_id", cursor)
+			if c.connectHook == nil {
+				continue
+			}
+			watchdog.Stop()
+			hookErr := c.connectHook(reqCtx)
+			watchdog.Reset(c.staleTimeout)
+			if hookErr != nil {
+				// The connection is dropped before any of its events is
+				// handled, and it counts as unhealthy so that a hook that
+				// keeps failing backs off instead of retrying at the minimum.
+				return false, fmt.Errorf("wanderer: on connect: %w", hookErr)
+			}
+		case slices.Contains(c.eventTypes, event.Type):
 			envelope, err := decodeEnvelope(event)
 			if err != nil {
 				// Payload drift must not take the connection down: the event
@@ -343,9 +428,6 @@ func (c *Client) connect(ctx context.Context, cursor string, handle func(Envelop
 			if handleErr != nil {
 				return healthy, &handlerError{err: fmt.Errorf("wanderer: handling event %s: %w", envelope.ID, handleErr)}
 			}
-		case EventConnected:
-			c.logger.Info("subscribed to the Wanderer map kill stream",
-				"map", c.mapID, "url", c.stream.String(), "last_event_id", cursor)
 		default:
 			c.logger.Debug("ignoring Wanderer event", "type", event.Type, "event_id", event.ID)
 		}
@@ -356,7 +438,7 @@ func (c *Client) connect(ctx context.Context, cursor string, handle func(Envelop
 // Wanderer's in-memory relay of recent events.
 func (c *Client) request(ctx context.Context, cursor string) (*http.Request, error) {
 	endpoint := c.stream
-	query := url.Values{"events": {EventMapKill}}
+	query := url.Values{"events": {strings.Join(c.eventTypes, ",")}}
 	if cursor != "" {
 		query.Set("last_event_id", cursor)
 	}

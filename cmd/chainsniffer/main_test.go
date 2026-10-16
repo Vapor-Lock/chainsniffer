@@ -120,7 +120,7 @@ func TestRelayPostsFiltersAndResumes(t *testing.T) {
 	}
 	assertLogged(t, logs.String(), map[string]any{"msg": "starting chainsniffer"})
 	assertLogged(t, logs.String(), map[string]any{
-		"msg": "subscribed to the Wanderer map kill stream", "map": testMap,
+		"msg": "subscribed to the Wanderer map event stream", "map": testMap,
 	})
 	assertLogged(t, logs.String(), map[string]any{
 		"msg": "posted killmail", "killmail_id": float64(postedKillID),
@@ -148,6 +148,96 @@ func TestRelayPostsFiltersAndResumes(t *testing.T) {
 	if got := second.queries(); len(got) == 0 || got[0].Get("last_event_id") != firstEventID {
 		t.Errorf("the second run asked for last_event_id=%q, want %q",
 			got[0].Get("last_event_id"), firstEventID)
+	}
+
+	// relay-runtime's "Home system unset": no topology requests, and a
+	// subscription to kills only.
+	for _, w := range []*fakeWanderer{first, second} {
+		if got := w.snapshotRequests(); len(got) != 0 {
+			t.Errorf("without a home system the relay requested /systems %d times, want never", len(got))
+		}
+		if got := w.queries(); len(got) == 0 || got[0].Get("events") != "map_kill" {
+			t.Errorf("without a home system the stream asked for events=%q, want %q", got[0].Get("events"), "map_kill")
+		}
+	}
+}
+
+// The systems of the home-chain test's map: home, linked to testSystemID
+// (where the fake ESI knows a name, so a kill there can be posted), and an
+// island of two systems linked to neither.
+const (
+	homeSystemID    = 31000727
+	islandSystemID  = 31000100
+	island2SystemID = 31000101
+)
+
+// TestRelayFiltersToTheHomeChain covers the end-to-end path of the linked-system
+// filter: chain-topology's "Snapshot on every connection" and "Topology
+// events", and relay-runtime's "Home system set". A kill in an island is
+// dropped, one in a linked system is posted, and once a connection_removed
+// cuts that system off, the next kill there is dropped too.
+func TestRelayFiltersToTheHomeChain(t *testing.T) {
+	const (
+		islandKillID  = 128412400
+		linkedKillID  = 128412401
+		cutOffKillID  = 128412402
+		islandEventID = "01JBQ8H0000000000000000011"
+		linkedEventID = "01JBQ8H0000000000000000012"
+		removeEventID = "01JBQ8H0000000000000000013"
+		cutOffEventID = "01JBQ8H0000000000000000014"
+	)
+
+	dir := t.TempDir()
+	esi := newFakeESI(t)
+	discordFake, discordURL := newFakeDiscord(t)
+	wandererFake, wandererURL := newFakeWanderer(t,
+		killFrameIn(islandEventID, islandSystemID, killmailJSONIn(islandKillID, islandSystemID, false))+
+			killFrame(linkedEventID, killmailJSON(linkedKillID, false))+
+			connectionRemovedFrame(removeEventID, testSystemID, homeSystemID)+
+			killFrame(cutOffEventID, killmailJSON(cutOffKillID, false)))
+	wandererFake.snapshot = snapshotJSON(
+		[]int64{homeSystemID, testSystemID, islandSystemID, island2SystemID},
+		[2]int64{homeSystemID, testSystemID}, [2]int64{islandSystemID, island2SystemID})
+
+	vars := testEnv(dir, wandererURL)
+	vars[config.EnvHomeSystemID] = fmt.Sprint(homeSystemID)
+	logs, stop := startRelay(t, vars, withDiscordBaseURL(discordURL), withESIBaseURL(esi))
+	waitFor(t, "the last event to be recorded", func() bool {
+		return readState(t, dir).LastEventID == cutOffEventID
+	})
+	if code := stop(); code != exitOK {
+		t.Errorf("run() = %d, want %d; logs:\n%s", code, exitOK, logs)
+	}
+
+	posts := discordFake.posted()
+	if len(posts) != 1 {
+		t.Fatalf("Discord received %d posts, want 1 (only the kill in the linked system); logs:\n%s", len(posts), logs)
+	}
+	if want := fmt.Sprintf("https://zkillboard.com/kill/%d/", linkedKillID); posts[0].URL != want {
+		t.Errorf("posted embed URL = %q, want %q", posts[0].URL, want)
+	}
+	for _, id := range []int64{islandKillID, cutOffKillID} {
+		assertLogged(t, logs.String(), map[string]any{
+			"msg": "dropping killmail", "killmail_id": float64(id), "filter": killmail.FilterUnlinkedSystem,
+		})
+	}
+	assertLogged(t, logs.String(), map[string]any{
+		"msg": "loaded map topology", "systems": float64(4), "linked_systems": float64(2),
+	})
+
+	snapshots := wandererFake.snapshotRequests()
+	if len(snapshots) == 0 {
+		t.Fatal("the relay never requested /systems")
+	}
+	if got, want := snapshots[0].Get("Authorization"), "Bearer "+testWandererToken; got != want {
+		t.Errorf("the snapshot request's Authorization = %q, want %q", got, want)
+	}
+	if got, want := snapshots[0].Get("Accept"), "application/json"; got != want {
+		t.Errorf("the snapshot request's Accept = %q, want %q", got, want)
+	}
+	if got := wandererFake.queries(); len(got) == 0 ||
+		got[0].Get("events") != "map_kill,connection_added,connection_removed,deleted_system" {
+		t.Errorf("the stream asked for events=%q, want map_kill and the three topology types", got[0].Get("events"))
 	}
 }
 
@@ -226,6 +316,15 @@ func TestRunExitsOneOnFatalFailures(t *testing.T) {
 			wantLog: "the relay stopped",
 		},
 		{
+			// chain-topology's "Fatal snapshot errors".
+			name: "Wanderer rejects the token on /systems",
+			setup: func(_ *testing.T, vars map[string]string, _ *fakeDiscord, w *fakeWanderer) {
+				vars[config.EnvHomeSystemID] = fmt.Sprint(homeSystemID)
+				w.snapshotStatus = http.StatusUnauthorized
+			},
+			wantLog: "the map systems request",
+		},
+		{
 			name: "the state directory cannot be created",
 			setup: func(t *testing.T, vars map[string]string, _ *fakeDiscord, _ *fakeWanderer) {
 				blocked := filepath.Join(t.TempDir(), "state")
@@ -252,6 +351,38 @@ func TestRunExitsOneOnFatalFailures(t *testing.T) {
 				t.Errorf("the logs do not report %q:\n%s", tc.wantLog, logs)
 			}
 		})
+	}
+}
+
+// TestRelayResyncsTheTopology covers chain-topology's "Periodic
+// resynchronisation": while the stream stays connected the topology is
+// reloaded every interval, and a reload that fails is a warning that neither
+// drops the stream nor stops the relay.
+func TestRelayResyncsTheTopology(t *testing.T) {
+	dir := t.TempDir()
+	esi := newFakeESI(t)
+	_, discordURL := newFakeDiscord(t)
+	wandererFake, wandererURL := newFakeWanderer(t, "")
+	wandererFake.snapshot = snapshotJSON([]int64{homeSystemID, testSystemID}, [2]int64{homeSystemID, testSystemID})
+	wandererFake.snapshotStatus, wandererFake.snapshotOKs = http.StatusServiceUnavailable, 2
+
+	vars := testEnv(dir, wandererURL)
+	vars[config.EnvHomeSystemID] = fmt.Sprint(homeSystemID)
+	vars[config.EnvTopologyResyncInterval] = "20ms"
+	logs, stop := startRelay(t, vars, withDiscordBaseURL(discordURL), withESIBaseURL(esi))
+	waitFor(t, "a periodic reload to fail", func() bool {
+		return strings.Contains(logs.String(), "reloading the map topology failed")
+	})
+	if code := stop(); code != exitOK {
+		t.Errorf("run() = %d, want %d: a failed periodic reload must not stop the relay; logs:\n%s",
+			code, exitOK, logs)
+	}
+
+	if got := len(wandererFake.queries()); got != 1 {
+		t.Errorf("the relay opened the stream %d times, want 1: a periodic reload never reconnects", got)
+	}
+	if got := len(wandererFake.snapshotRequests()); got < 3 {
+		t.Errorf("the relay requested /systems %d times, want the connect snapshot and periodic reloads", got)
 	}
 }
 
@@ -463,9 +594,16 @@ type fakeWanderer struct {
 	// endpoint answers with instead.
 	status int
 	body   string
+	// snapshot is the body /systems answers with, and snapshotStatus, when
+	// non-zero, the refusal it answers with instead — from the first request
+	// on, or once snapshotOKs requests have been answered.
+	snapshot       string
+	snapshotStatus int
+	snapshotOKs    int
 
-	mu      sync.Mutex
-	queried []url.Values
+	mu        sync.Mutex
+	queried   []url.Values
+	snapshots []http.Header
 }
 
 // newFakeWanderer returns a fake serving frames, and the base URL to configure
@@ -480,6 +618,11 @@ func newFakeWanderer(t *testing.T, frames string) (*fakeWanderer, string) {
 }
 
 func (f *fakeWanderer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/api/maps/"+testMap+"/systems" {
+		f.serveSnapshot(w, r)
+		return
+	}
+
 	f.mu.Lock()
 	f.queried = append(f.queried, r.URL.Query())
 	f.mu.Unlock()
@@ -506,6 +649,33 @@ func (f *fakeWanderer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	<-r.Context().Done()
 }
 
+// serveSnapshot answers GET /api/maps/{map}/systems, the topology snapshot.
+func (f *fakeWanderer) serveSnapshot(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.snapshots = append(f.snapshots, r.Header.Clone())
+	served := len(f.snapshots) - 1
+	f.mu.Unlock()
+
+	if want := "Bearer " + testWandererToken; r.Header.Get("Authorization") != want {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if f.snapshotStatus != 0 && served >= f.snapshotOKs {
+		writeJSON(w, f.snapshotStatus, map[string]any{"error": "Invalid token"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = io.WriteString(w, f.snapshot)
+}
+
+// snapshotRequests returns the headers of every snapshot request the fake
+// served, in order.
+func (f *fakeWanderer) snapshotRequests() []http.Header {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]http.Header(nil), f.snapshots...)
+}
+
 // queries returns the query of every stream request the fake served, in order.
 func (f *fakeWanderer) queries() []url.Values {
 	f.mu.Lock()
@@ -524,8 +694,13 @@ func connectedFrame() string {
 // killFrame is a map_kill frame carrying killmails in the killmail_update
 // payload shape Wanderer's message handler sends.
 func killFrame(eventID string, killmails ...string) string {
+	return killFrameIn(eventID, testSystemID, killmails...)
+}
+
+// killFrameIn is killFrame for a kill in another system.
+func killFrameIn(eventID string, systemID int64, killmails ...string) string {
 	payload := fmt.Sprintf(`{"type":"killmail_update","solar_system_id":%d,"timestamp":%q,"killmails":[%s]}`,
-		testSystemID, stamp(), strings.Join(killmails, ","))
+		systemID, stamp(), strings.Join(killmails, ","))
 	return frame(eventID, "map_kill", fmt.Sprintf(
 		`{"id":%q,"type":"map_kill","map_id":%q,"timestamp":%q,"payload":%s}`,
 		eventID, testMapID, stamp(), payload))
@@ -534,13 +709,43 @@ func killFrame(eventID string, killmails ...string) string {
 // killmailJSON is one entry of a killmail_update payload, flat as Wanderer
 // sends it. The kill time is now, so the default one-hour age filter keeps it.
 func killmailJSON(id int64, npc bool) string {
+	return killmailJSONIn(id, testSystemID, npc)
+}
+
+// killmailJSONIn is killmailJSON for a kill in another system.
+func killmailJSONIn(id, systemID int64, npc bool) string {
 	return fmt.Sprintf(`{"killmail_id":%d,"kill_time":%q,"solar_system_id":%d,`+
 		`"victim_char_id":2112000001,"victim_char_name":"Pilot %d",`+
 		`"victim_corp_id":%d,"victim_corp_ticker":"CORP","victim_corp_name":"A Corporation",`+
 		`"victim_ship_type_id":670,"victim_ship_name":"Capsule",`+
 		`"final_blow_char_name":"Shooter","final_blow_corp_ticker":"ENMY","final_blow_ship_name":"Loki",`+
 		`"attacker_count":3,"total_value":412500000.0,"npc":%t}`,
-		id, stamp(), testSystemID, id, testCorpID, npc)
+		id, stamp(), systemID, id, testCorpID, npc)
+}
+
+// connectionRemovedFrame is a connection_removed frame in the payload shape
+// Wanderer's maybe_remove_connection broadcasts.
+func connectionRemovedFrame(eventID string, source, target int64) string {
+	payload := fmt.Sprintf(`{"connection_id":"c0ffee00-0000-4000-8000-000000000001",`+
+		`"solar_system_source_id":%d,"solar_system_target_id":%d}`, source, target)
+	return frame(eventID, "connection_removed", fmt.Sprintf(
+		`{"id":%q,"type":"connection_removed","map_id":%q,"timestamp":%q,"payload":%s}`,
+		eventID, testMapID, stamp(), payload))
+}
+
+// snapshotJSON is a /systems answer in the shape of Wanderer's
+// MapSystemAPIController.index, listing systems and the connections between
+// the given pairs.
+func snapshotJSON(systems []int64, connections ...[2]int64) string {
+	var ss, cs []string
+	for _, id := range systems {
+		ss = append(ss, fmt.Sprintf(`{"solar_system_id":%d,"name":"S%d","visible":true}`, id, id))
+	}
+	for _, c := range connections {
+		cs = append(cs, fmt.Sprintf(`{"solar_system_source":%d,"solar_system_target":%d,"type":0}`, c[0], c[1]))
+	}
+	return fmt.Sprintf(`{"data":{"systems":[%s],"connections":[%s]}}`,
+		strings.Join(ss, ","), strings.Join(cs, ","))
 }
 
 func frame(id, eventType, data string) string {

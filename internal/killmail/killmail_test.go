@@ -278,3 +278,26 @@ func TestExtractNilLoggerUsesDefault(t *testing.T) {
 		t.Fatalf("got %+v, want one killmail with ID 7", kills)
 	}
 }
+
+// An entry without a solar_system_id takes the payload's, an entry with one
+// keeps its own, and with neither the system stays unknown.
+func TestExtractSolarSystemFallback(t *testing.T) {
+	log, _ := testLogger()
+
+	kills := killmail.Extract([]byte(`{"type":"killmail_update","solar_system_id":31000002,"killmails":[
+		{"killmail_id":1},{"killmail_id":2,"solar_system_id":31000099},{"killmail_id":3,"solar_system_id":null}]}`), log)
+	want := []int64{31000002, 31000099, 31000002}
+	if len(kills) != len(want) {
+		t.Fatalf("got %d killmails, want %d", len(kills), len(want))
+	}
+	for i, k := range kills {
+		if k.SolarSystemID != want[i] {
+			t.Errorf("killmail %d: SolarSystemID = %d, want %d", k.ID, k.SolarSystemID, want[i])
+		}
+	}
+
+	kills = killmail.Extract([]byte(`{"type":"killmail_update","killmails":[{"killmail_id":4}]}`), log)
+	if len(kills) != 1 || kills[0].SolarSystemID != 0 {
+		t.Errorf("got %+v, want one killmail with no system", kills)
+	}
+}

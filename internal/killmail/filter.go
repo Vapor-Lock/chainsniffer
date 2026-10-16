@@ -5,10 +5,11 @@ import "time"
 // The names of the filters in the chain. Allow returns one of them for every
 // killmail it drops, so the relay can log which filter made the decision.
 const (
-	FilterNPC          = "npc"
-	FilterMinValue     = "min_value"
-	FilterFriendlyOnly = "friendly_only"
-	FilterMaxKillAge   = "max_kill_age"
+	FilterUnlinkedSystem = "unlinked_system"
+	FilterNPC            = "npc"
+	FilterMinValue       = "min_value"
+	FilterFriendlyOnly   = "friendly_only"
+	FilterMaxKillAge     = "max_kill_age"
 )
 
 // Filters is the chain deciding which killmails are worth posting. The zero
@@ -16,6 +17,13 @@ const (
 // whose defaults differ (NPC kills are excluded and kills older than an hour
 // are dropped).
 type Filters struct {
+	// Linked drops killmails whose solar system it reports as not linked to
+	// the home system. Nil disables the filter. A killmail whose system is
+	// unknown (SolarSystemID 0) is never linked, whatever Linked says. The
+	// relay wires in the topology graph, which answers as of the moment the
+	// killmail is processed, not as of the kill.
+	Linked func(systemID int64) bool
+
 	// ExcludeNPC drops killmails the payload flags as NPC kills.
 	ExcludeNPC bool
 
@@ -40,6 +48,9 @@ type Filters struct {
 // Allow reports whether k, classified as c, should be posted. When it returns
 // false, the second result names the filter that dropped it.
 func (f Filters) Allow(k Killmail, c Classification) (bool, string) {
+	if f.Linked != nil && (k.SolarSystemID == 0 || !f.Linked(k.SolarSystemID)) {
+		return false, FilterUnlinkedSystem
+	}
 	if f.ExcludeNPC && k.NPC {
 		return false, FilterNPC
 	}

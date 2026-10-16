@@ -30,6 +30,7 @@ func TestClientRequestsTheMapKillStream(t *testing.T) {
 	tests := []struct {
 		name      string
 		cursor    string
+		opts      []wanderer.Option
 		wantQuery url.Values
 	}{
 		{
@@ -40,6 +41,14 @@ func TestClientRequestsTheMapKillStream(t *testing.T) {
 			name:      "with a cursor",
 			cursor:    "01JB",
 			wantQuery: url.Values{"events": {"map_kill"}, "last_event_id": {"01JB"}},
+		},
+		{
+			name: "with topology event types",
+			opts: []wanderer.Option{wanderer.WithEventTypes(
+				wanderer.EventMapKill, wanderer.EventDeletedSystem,
+				wanderer.EventConnectionAdded, wanderer.EventConnectionRemoved,
+			)},
+			wantQuery: url.Values{"events": {"map_kill,deleted_system,connection_added,connection_removed"}},
 		},
 	}
 
@@ -52,7 +61,7 @@ func TestClientRequestsTheMapKillStream(t *testing.T) {
 			defer cancel()
 
 			stop := &sleeper{stopAfter: 1, cancel: cancel}
-			client := newClient(t, server.URL, wanderer.WithSleep(stop.sleep))
+			client := newClient(t, server.URL, append(test.opts, wanderer.WithSleep(stop.sleep))...)
 			if err := client.Run(ctx, func() string { return test.cursor }, failOnEvent(t)); !errors.Is(err, context.Canceled) {
 				t.Fatalf("Run() = %v, want context.Canceled", err)
 			}
@@ -129,11 +138,166 @@ func TestClientDeliversOnlyKillEventsInOrder(t *testing.T) {
 		}
 	}
 
-	if text := logs.String(); !strings.Contains(text, "subscribed to the Wanderer map kill stream") {
+	if text := logs.String(); !strings.Contains(text, "subscribed to the Wanderer map event stream") {
 		t.Errorf("the connected event was not logged:\n%s", text)
 	}
 	if got, want := strings.Count(logs.String(), "skipping malformed Wanderer event"), 2; got != want {
 		t.Errorf("logged %d malformed events, want %d:\n%s", got, want, logs.String())
+	}
+}
+
+func TestClientDeliversEverySubscribedType(t *testing.T) {
+	t.Parallel()
+
+	removed := `{"id":"01C","type":"connection_removed","map_id":"m","payload":{"connection_id":"c1","solar_system_source_id":31000001,"solar_system_target_id":31000002}}`
+	stream := connectedFrame("01A") +
+		killFrame("01B", 1) +
+		frame("01C", wanderer.EventConnectionRemoved, removed) +
+		frame("01D", "add_system", `{"id":"01D","type":"add_system","payload":{}}`)
+
+	server, _ := newStreamServer(t, writeFrames(stream))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var got []string
+	stop := &sleeper{stopAfter: 1, cancel: cancel}
+	client := newClient(t, server.URL,
+		wanderer.WithSleep(stop.sleep),
+		wanderer.WithEventTypes(wanderer.EventMapKill, wanderer.EventConnectionRemoved),
+	)
+	err := client.Run(ctx, nil, func(envelope wanderer.Envelope) error {
+		got = append(got, envelope.ID+" "+envelope.Type)
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() = %v, want context.Canceled", err)
+	}
+
+	want := []string{"01B map_kill", "01C connection_removed"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("handler received %v, want %v", got, want)
+	}
+}
+
+func TestClientRunsTheConnectHookBeforeTheFirstEvent(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newStreamServer(t, writeFrames(connectedFrame("01A")+killFrame("01B", 1)+killFrame("01C", 2)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls []string
+	stop := &sleeper{stopAfter: 1, cancel: cancel}
+	client := newClient(t, server.URL,
+		wanderer.WithSleep(stop.sleep),
+		wanderer.WithConnectHook(func(context.Context) error {
+			calls = append(calls, "hook")
+			return nil
+		}),
+	)
+	err := client.Run(ctx, nil, func(envelope wanderer.Envelope) error {
+		calls = append(calls, envelope.ID)
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() = %v, want context.Canceled", err)
+	}
+
+	// The connected event 01A is the hook's cue and never reaches the handler.
+	if want := []string{"hook", "01B", "01C"}; fmt.Sprint(calls) != fmt.Sprint(want) {
+		t.Errorf("calls = %v, want %v", calls, want)
+	}
+}
+
+func TestClientRerunsTheConnectHookOnReconnect(t *testing.T) {
+	t.Parallel()
+
+	server, recorder := newStreamServer(t, writeFrames(connectedFrame("01A")+killFrame("01B", 1)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	hooks, handled := 0, 0
+	stop := &sleeper{stopAfter: 3, cancel: cancel}
+	client := newClient(t, server.URL,
+		wanderer.WithSleep(stop.sleep),
+		wanderer.WithConnectHook(func(context.Context) error {
+			hooks++
+			return nil
+		}),
+	)
+	err := client.Run(ctx, nil, func(wanderer.Envelope) error {
+		handled++
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() = %v, want context.Canceled", err)
+	}
+
+	if got := recorder.count(); hooks != got || handled != got {
+		t.Errorf("hook ran %d times and handler %d times over %d connections, want once each per connection", hooks, handled, got)
+	}
+	if hooks != 3 {
+		t.Errorf("hook ran %d times, want 3", hooks)
+	}
+}
+
+func TestClientReconnectsWhenTheConnectHookFails(t *testing.T) {
+	t.Parallel()
+
+	server, recorder := newStreamServer(t, writeFrames(connectedFrame("01A")+killFrame("01B", 1)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	logs := &logBuffer{}
+	stop := &sleeper{stopAfter: 3, cancel: cancel}
+	client := newClient(t, server.URL,
+		wanderer.WithSleep(stop.sleep),
+		wanderer.WithBackoff(100*time.Millisecond, time.Second),
+		wanderer.WithJitter(0),
+		wanderer.WithLogger(logs.logger(slog.LevelInfo)),
+		wanderer.WithConnectHook(func(context.Context) error {
+			return errors.New("snapshot answered 502")
+		}),
+	)
+	if err := client.Run(ctx, func() string { return "01Z" }, failOnEvent(t)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() = %v, want context.Canceled", err)
+	}
+
+	// A connection whose hook failed never became healthy, so the backoff
+	// keeps growing instead of starting over at the minimum.
+	want := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
+	if got := stop.recorded(); !equalDurations(got, want) {
+		t.Errorf("backoff delays = %v, want %v", got, want)
+	}
+	for i, request := range recorder.all() {
+		if got := request.Query.Get("last_event_id"); got != "01Z" {
+			t.Errorf("request %d last_event_id = %q, want the unchanged cursor %q", i, got, "01Z")
+		}
+	}
+	if text := logs.String(); !strings.Contains(text, "snapshot answered 502") {
+		t.Errorf("the hook failure was not logged:\n%s", text)
+	}
+}
+
+func TestClientStopsOnAFatalConnectHookError(t *testing.T) {
+	t.Parallel()
+
+	fatal := &wanderer.FatalError{Request: "the map systems request", StatusCode: http.StatusUnauthorized}
+	server, recorder := newStreamServer(t, writeFrames(connectedFrame("01A")+killFrame("01B", 1)))
+	client := newClient(t, server.URL,
+		wanderer.WithSleep(failOnSleep(t)),
+		wanderer.WithConnectHook(func(context.Context) error {
+			return fmt.Errorf("loading the topology: %w", fatal)
+		}),
+	)
+
+	err := client.Run(context.Background(), nil, failOnEvent(t))
+	var got *wanderer.FatalError
+	if !errors.As(err, &got) || got != fatal {
+		t.Fatalf("Run() = %v, want the hook's *FatalError", err)
+	}
+	if count := recorder.count(); count != 1 {
+		t.Errorf("made %d requests, want no reconnect", count)
 	}
 }
 
@@ -334,7 +498,7 @@ func TestClientFatalResponses(t *testing.T) {
 			name:     "forbidden without a code",
 			status:   http.StatusForbidden,
 			body:     "forbidden",
-			wantHint: "not allowed to stream this map",
+			wantHint: "not allowed to read this map",
 		},
 		{
 			name:     "unknown map",
