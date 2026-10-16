@@ -160,9 +160,10 @@ func Load(lookup LookupFunc) (*Config, error) {
 
 // LogValue implements slog.LogValuer, so logging a Config writes a summary of
 // the effective settings with both tokens redacted. This is the summary
-// cmd/chainsniffer logs at startup.
+// cmd/chainsniffer logs at startup. The home system is left out when none is
+// configured, rather than logged as 0.
 func (c *Config) LogValue() slog.Value {
-	return slog.GroupValue(
+	attrs := []slog.Attr{
 		slog.String("wanderer_url", c.WandererURL),
 		slog.String("wanderer_map", c.WandererMap),
 		slog.String("wanderer_token", c.WandererToken.String()),
@@ -174,12 +175,17 @@ func (c *Config) LogValue() slog.Value {
 		slog.Bool("exclude_npc", c.ExcludeNPC),
 		slog.Float64("min_value", c.MinValue),
 		slog.Duration("max_kill_age", c.MaxKillAge),
-		slog.Int64("home_system_id", c.HomeSystemID),
+	}
+	if c.HomeSystemID != 0 {
+		attrs = append(attrs, slog.Int64("home_system_id", c.HomeSystemID))
+	}
+	attrs = append(attrs,
 		slog.Duration("topology_resync_interval", c.TopologyResyncInterval),
 		slog.String("state_dir", c.StateDir),
 		slog.String("log_level", c.LogLevel.String()),
 		slog.String("log_format", string(c.LogFormat)),
 	)
+	return slog.GroupValue(attrs...)
 }
 
 // Error reports everything wrong with the environment at once.
