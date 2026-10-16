@@ -236,8 +236,8 @@ func TestRelayFiltersToTheHomeChain(t *testing.T) {
 		t.Errorf("the snapshot request's Accept = %q, want %q", got, want)
 	}
 	if got := wandererFake.queries(); len(got) == 0 ||
-		got[0].Get("events") != "map_kill,connection_added,connection_removed,deleted_system" {
-		t.Errorf("the stream asked for events=%q, want map_kill and the three topology types", got[0].Get("events"))
+		got[0].Get("events") != "map_kill,connection_added,connection_removed,deleted_system,system_metadata_changed" {
+		t.Errorf("the stream asked for events=%q, want map_kill and the four topology types", got[0].Get("events"))
 	}
 }
 
