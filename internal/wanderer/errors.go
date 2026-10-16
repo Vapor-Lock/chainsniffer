@@ -22,6 +22,16 @@ const (
 // answers with, which it sends without an error code.
 const sseDisabledBody = "Server-Sent Events are disabled on this server"
 
+// publicAPIDisabledBody is the plain-text 403 body of a server whose public API
+// is switched off, which guards the stream and the REST endpoints alike.
+const publicAPIDisabledBody = "Public API is disabled"
+
+// What a request is called in its errors.
+const (
+	requestStream   = "the map stream"
+	requestSnapshot = "the map systems request"
+)
+
 // maxErrorBody bounds how much of an error response is read for the log.
 const maxErrorBody = 8 << 10
 
@@ -29,10 +39,13 @@ const maxErrorBody = 8 << 10
 const messageLimit = 300
 
 // FatalError reports a response that no retry can fix: the token, the map ID,
-// or the SSE setting of the map or the server has to be changed. Hint says
-// which.
+// or the API or SSE setting of the map or the server has to be changed. Hint
+// says which.
 type FatalError struct {
-	// StatusCode is the HTTP status the stream endpoint answered with.
+	// Request names the refused request, such as "the map stream". Empty
+	// means the stream.
+	Request string
+	// StatusCode is the HTTP status the endpoint answered with.
 	StatusCode int
 	// Code is the error code from the response body, when it carried one.
 	Code string
@@ -43,8 +56,12 @@ type FatalError struct {
 }
 
 func (e *FatalError) Error() string {
+	request := e.Request
+	if request == "" {
+		request = requestStream
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "wanderer: the map stream was refused with %d %s", e.StatusCode, http.StatusText(e.StatusCode))
+	fmt.Fprintf(&b, "wanderer: %s was refused with %d %s", request, e.StatusCode, http.StatusText(e.StatusCode))
 	if e.Code != "" {
 		fmt.Fprintf(&b, " (%s)", e.Code)
 	}
@@ -65,10 +82,10 @@ func IsFatal(err error) bool {
 	return errors.As(err, &fatal)
 }
 
-// statusError classifies a non-200 response from the stream endpoint. It
-// returns a *FatalError for a misconfiguration and a plain error, which Run
-// retries, for everything else.
-func statusError(resp *http.Response) error {
+// statusError classifies a non-200 response to request, which names it in the
+// error. It returns a *FatalError for a misconfiguration and a plain error,
+// which the caller retries, for everything else.
+func statusError(resp *http.Response, request string) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 	code, message := parseServerError(body)
 
@@ -83,14 +100,15 @@ func statusError(resp *http.Response) error {
 	}
 	if fatal {
 		return &FatalError{
+			Request:    request,
 			StatusCode: resp.StatusCode,
 			Code:       code,
 			Message:    message,
-			Hint:       fatalHint(resp.StatusCode, code),
+			Hint:       fatalHint(resp.StatusCode, code, message),
 		}
 	}
 
-	err := fmt.Errorf("wanderer: the map stream answered %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	err := fmt.Errorf("wanderer: %s answered %d %s", request, resp.StatusCode, http.StatusText(resp.StatusCode))
 	if code != "" {
 		err = fmt.Errorf("%w (%s)", err, code)
 	}
@@ -100,9 +118,12 @@ func statusError(resp *http.Response) error {
 	return err
 }
 
-// fatalHint is the actionable part of a fatal error: what to change.
-func fatalHint(status int, code string) string {
+// fatalHint is the actionable part of a fatal error: what to change. The
+// wording fits the stream and the REST requests alike.
+func fatalHint(status int, code, message string) string {
 	switch {
+	case status == http.StatusForbidden && strings.Contains(message, publicAPIDisabledBody):
+		return "this Wanderer instance has its public API disabled; point the relay at an instance that offers it"
 	case code == codeSSEDisabledForMap:
 		return "enable Server-Sent Events for this map in its Wanderer map settings"
 	case code == codeSSEGloballyDisabled, status == http.StatusServiceUnavailable:
@@ -112,7 +133,7 @@ func fatalHint(status int, code string) string {
 	case status == http.StatusUnauthorized:
 		return "check the configured token: it has to be the map's public API key from the map's settings"
 	case status == http.StatusForbidden:
-		return "the token is not allowed to stream this map; check that it belongs to the map and that SSE is enabled for it"
+		return "the token is not allowed to read this map; check that it belongs to the map and that SSE is enabled for it"
 	case status == http.StatusNotFound:
 		return "check the configured map ID or slug"
 	}

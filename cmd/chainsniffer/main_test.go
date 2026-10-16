@@ -120,7 +120,7 @@ func TestRelayPostsFiltersAndResumes(t *testing.T) {
 	}
 	assertLogged(t, logs.String(), map[string]any{"msg": "starting chainsniffer"})
 	assertLogged(t, logs.String(), map[string]any{
-		"msg": "subscribed to the Wanderer map kill stream", "map": testMap,
+		"msg": "subscribed to the Wanderer map event stream", "map": testMap,
 	})
 	assertLogged(t, logs.String(), map[string]any{
 		"msg": "posted killmail", "killmail_id": float64(postedKillID),
