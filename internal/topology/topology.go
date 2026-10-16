@@ -6,7 +6,7 @@
 // by Wanderer's connection ID: the snapshot and the events both carry the two
 // system IDs, Wanderer holds at most one connection per pair, and the
 // connections a system deletion takes with it are never reported by ID (see
-// openspec/changes/add-linked-system-filter/design.md).
+// openspec/changes/archive/2026-10-16-add-linked-system-filter/design.md).
 //
 // The graph changes two ways. Apply handles the stream's topology events, and
 // a resync (BeginResync, then Install) replaces the whole graph with a REST
