@@ -41,22 +41,26 @@ const (
 //
 // systemName is the name resolved for k.SolarSystemID, or its decimal ID when
 // the name could not be resolved (see internal/universe); an empty systemName
-// leaves the System field out. alias is the system's chain alias, Wanderer's
-// temporary name for it, which the System field shows in parentheses after
-// the name, as "J134349 (HOTEL)"; an empty alias shows the name alone.
+// leaves the System row out. alias is the system's chain alias, Wanderer's
+// temporary name for it, which the System row shows in parentheses after the
+// name, as "J134349 (HOTEL)"; an empty alias shows the name alone.
+//
+// Everything but the title, the link, the thumbnail, the colour, the
+// timestamp and the footer goes in the description as one monospace block of
+// labelled rows (see block), so the rows line up the same way on every card.
 //
 // Render is a pure function of its arguments — posting lives elsewhere in this
 // package — so the layout is covered by golden tests. Every field of a
 // killmail but its ID is optional (see internal/killmail), so each part of the
 // embed is dropped when the payload did not carry it: the embed always
-// renders, and never shows an empty field or a dangling separator.
+// renders, and never shows an empty row or a dangling separator.
 func Render(k killmail.Killmail, c killmail.Classification, systemName, alias string) *discordgo.MessageEmbed {
 	embed := &discordgo.MessageEmbed{
-		Type:   discordgo.EmbedTypeRich,
-		Title:  title(k.Victim),
-		URL:    fmt.Sprintf(killURL, k.ID),
-		Color:  color(c),
-		Fields: fields(k, system(systemName, alias)),
+		Type:        discordgo.EmbedTypeRich,
+		Title:       title(k.Victim),
+		URL:         fmt.Sprintf(killURL, k.ID),
+		Color:       color(c),
+		Description: block(rows(k, system(systemName, alias))),
 	}
 	if k.Victim.ShipTypeID > 0 {
 		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
@@ -108,8 +112,9 @@ func footer(c killmail.Classification) string {
 	}
 }
 
-// maxAliasLen caps the alias, in characters, well inside Discord's
-// 1024-character field value limit: a field over the limit makes Discord
+// maxAliasLen caps the alias, in characters, so that one alias cannot wrap
+// into a wall of continuation lines, and keeps the description well inside
+// Discord's 4096-character limit: a description over the limit makes Discord
 // reject the whole embed, and the kill with it.
 const maxAliasLen = 100
 
@@ -124,7 +129,7 @@ var markdownEscaper = strings.NewReplacer(
 	"|", `\|`,
 )
 
-// system is the System field's value: the system name, followed by its chain
+// system is the System row's value: the system name, followed by its chain
 // alias in parentheses when it has one. An alias without a name to follow has
 // nothing to annotate and is left out with it.
 func system(name, alias string) string {
@@ -137,35 +142,109 @@ func system(name, alias string) string {
 	return name + " (" + markdownEscaper.Replace(alias) + ")"
 }
 
-// fields builds the inline fields, in the order the design lays them out.
-// Fields with nothing to say are left out entirely.
-func fields(k killmail.Killmail, systemName string) []*discordgo.MessageEmbedField {
-	var out []*discordgo.MessageEmbedField
-	add := func(name, value string) {
+// row is one labelled item of the block. Its value may span several lines.
+type row struct {
+	label, value string
+}
+
+// rows lists the block's rows, in the order the design lays them out. Rows
+// with nothing to say are left out entirely.
+func rows(k killmail.Killmail, systemName string) []row {
+	var out []row
+	add := func(label, value string) {
 		if value == "" {
 			return
 		}
-		out = append(out, &discordgo.MessageEmbedField{Name: name, Value: value, Inline: true})
+		out = append(out, row{label, value})
 	}
 
 	add("System", systemName)
 	// A killmail whose payload omitted total_value decodes to 0 ISK, which
-	// says nothing, so the field is dropped rather than claiming a free kill.
+	// says nothing, so the row is dropped rather than claiming a free kill.
 	if k.TotalValue > 0 {
 		add("Value", FormatISK(k.TotalValue)+" ISK")
 	}
 	if k.AttackerCount > 0 {
 		add("Attackers", strconv.Itoa(k.AttackerCount))
 	}
-	// The victim's ship and pilot are already in the title, so this field
+	// The victim's ship and pilot are already in the title, so this row
 	// carries their affiliation.
 	add("Victim", affiliation(k.Victim))
 	add("Final blow", finalBlow(k.FinalBlow))
 	return out
 }
 
+const (
+	// blockWidth is the most columns, counted in runes, that any line of the
+	// block takes. It fits beside the thumbnail inside Discord's maximum embed
+	// width, so the block never decides how wide a card is.
+	blockWidth = 40
+
+	// labelWidth is the label column: "Final blow" and a space. Every value
+	// starts in the column after it.
+	labelWidth = 11
+
+	// valueWidth is what is left of a line for the value.
+	valueWidth = blockWidth - labelWidth
+
+	// fence opens and closes a Discord code block.
+	fence = "```"
+)
+
+// block lays the rows out as one code block: each label left-aligned in the
+// label column, its value after it, and every further line of the value,
+// whether the value has several lines or one too long to fit, indented to the
+// value column. No rows make no block.
+func block(rows []row) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(fence + "\n")
+	indent := strings.Repeat(" ", labelWidth)
+	for _, r := range rows {
+		prefix := fmt.Sprintf("%-*s", labelWidth, r.label)
+		for _, line := range strings.Split(r.value, "\n") {
+			for _, part := range wrap(line, valueWidth) {
+				b.WriteString(prefix + part + "\n")
+				prefix = indent
+			}
+		}
+	}
+	b.WriteString(fence)
+	return b.String()
+}
+
+// wrap breaks a line into pieces of at most width runes, each at the last
+// space that lets it fit, and hard-breaks a word too long to fit on a line of
+// its own. The space a line breaks at is dropped.
+func wrap(line string, width int) []string {
+	var out []string
+	r := []rune(line)
+	for len(r) > width {
+		cut := lastSpace(r[:width+1])
+		if cut <= 0 {
+			out = append(out, string(r[:width]))
+			r = r[width:]
+			continue
+		}
+		out = append(out, string(r[:cut]))
+		r = r[cut+1:]
+	}
+	return append(out, string(r))
+}
+
+func lastSpace(r []rune) int {
+	for i := len(r) - 1; i >= 0; i-- {
+		if r[i] == ' ' {
+			return i
+		}
+	}
+	return -1
+}
+
 // finalBlow names the pilot who landed the last shot as "Pilot (Ship)", with
-// their affiliation on a second line. An NPC final blow usually has a ship and
+// their affiliation on the lines below. An NPC final blow usually has a ship and
 // no pilot name, in which case the ship stands alone.
 func finalBlow(p killmail.Party) string {
 	pilot := p.CharName
@@ -180,11 +259,11 @@ func finalBlow(p killmail.Party) string {
 }
 
 // affiliation renders a party's corporation and alliance as
-// "[TICKER] Corporation / <TICKER> Alliance", using the brackets EVE players
-// see in game. Whichever half, or whichever ticker, the payload left out is
-// simply absent.
+// "[TICKER] Corporation" and "<TICKER> Alliance" on a line each, using the
+// brackets EVE players see in game. Whichever half, or whichever ticker, the
+// payload left out is simply absent.
 func affiliation(p killmail.Party) string {
-	return join(" / ",
+	return join("\n",
 		entity(p.CorpTicker, p.CorpName, "[", "]"),
 		entity(p.AllianceTicker, p.AllianceName, "<", ">"),
 	)

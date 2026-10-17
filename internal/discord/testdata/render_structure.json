@@ -2,6 +2,7 @@
   "url": "https://zkillboard.com/kill/987654321/",
   "type": "rich",
   "title": "Astrahus — Friendly Corporation",
+  "description": "```\nSystem     J100001\nValue      1.2B ISK\nAttackers  3\nVictim     [FRND] Friendly Corporation\nFinal blow Guristas Despoiler\n```",
   "timestamp": "2026-10-13T04:05:06Z",
   "color": 12597547,
   "footer": {
@@ -9,32 +10,5 @@
   },
   "thumbnail": {
     "url": "https://images.evetech.net/types/35832/render?size=128"
-  },
-  "fields": [
-    {
-      "name": "System",
-      "value": "J100001",
-      "inline": true
-    },
-    {
-      "name": "Value",
-      "value": "1.2B ISK",
-      "inline": true
-    },
-    {
-      "name": "Attackers",
-      "value": "3",
-      "inline": true
-    },
-    {
-      "name": "Victim",
-      "value": "[FRND] Friendly Corporation",
-      "inline": true
-    },
-    {
-      "name": "Final blow",
-      "value": "Guristas Despoiler",
-      "inline": true
-    }
-  ]
+  }
 }
