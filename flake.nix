@@ -56,6 +56,7 @@
           meta = {
             description = "Discord bot relaying in-chain Wanderer killmails";
             mainProgram = "chainsniffer";
+            license = pkgs.lib.licenses.mit;
           };
         });
 
@@ -117,6 +118,16 @@
             User = "${toString uid}:${toString uid}";
             Volumes = {
               ${stateDir} = { };
+            };
+            # GHCR links the package to its repository through the source label. The
+            # revision makes the image derivation change on every commit, which is cheap:
+            # the layers below it are cached.
+            Labels = {
+              "org.opencontainers.image.source" = "https://github.com/Vapor-Lock/chainsniffer";
+              "org.opencontainers.image.version" = chainsniffer.version;
+              "org.opencontainers.image.revision" = self.rev or self.dirtyRev or "unknown";
+              "org.opencontainers.image.description" = chainsniffer.meta.description;
+              "org.opencontainers.image.licenses" = "MIT";
             };
           };
         };

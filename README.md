@@ -223,7 +223,10 @@ docker load < result
 
 That loads `chainsniffer:0.2.0`: the binary, a CA bundle, and nothing else — no shell and no
 package manager. It runs as uid `65532` and declares a volume at `/var/lib/chainsniffer` owned by
-that user, so a mounted volume is writable without any further setup.
+that user, so a mounted volume is writable without any further setup. It carries the standard OCI
+labels: `org.opencontainers.image.source` (the GitHub repository), `.version`, `.revision` (the
+commit it was built from), `.description` and `.licenses` (`MIT`), so
+`docker inspect --format '{{json .Config.Labels}}' chainsniffer:0.1.0` tells you what you are running.
 
 ```sh
 docker run -d --name chainsniffer --restart unless-stopped \
@@ -403,3 +406,7 @@ hash mismatch. To update it:
 
 The specs this was built from live in `openspec/changes/archive/2026-10-14-add-killmail-relay-bot/`;
 `design.md` there documents the Wanderer wire format and the decisions behind the layout.
+
+## License
+
+MIT; see [`LICENSE`](LICENSE).
