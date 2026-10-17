@@ -10,4 +10,4 @@
 
 ## 2. Live check
 
-- [ ] 2.1 Run a build with `CHAINSNIFFER_REPLAY_CHANNEL_ID` set to a test channel against a state directory a relay has posted from, and confirm the card appears there and nowhere else.
+- [x] 2.1 Run a build with `CHAINSNIFFER_REPLAY_CHANNEL_ID` set to a test channel against a state directory a relay has posted from, and confirm the card appears there and nowhere else.
