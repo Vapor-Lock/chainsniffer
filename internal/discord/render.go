@@ -37,7 +37,20 @@ const (
 	unknownPilot = "Unknown pilot"
 )
 
-// Render turns one classified killmail into the embed the relay posts.
+// CardStyle is the layout Render gives a card: one monospace block in the
+// description (CardStyleBlock), or inline fields (CardStyleFields), the cards
+// the relay posted before the block replaced them. Both share the title, the
+// link, the colour, the thumbnail, the timestamp and the footer.
+type CardStyle string
+
+const (
+	CardStyleBlock  CardStyle = "block"
+	CardStyleFields CardStyle = "fields"
+)
+
+// Render turns one classified killmail into the embed the relay posts, laid
+// out in the given style; any style but CardStyleFields renders as
+// CardStyleBlock.
 //
 // systemName is the name resolved for k.SolarSystemID, or its decimal ID when
 // the name could not be resolved (see internal/universe); an empty systemName
@@ -45,25 +58,30 @@ const (
 // temporary name for it, which the System row shows in parentheses after the
 // name, as "J134349 (HOTEL)"; an empty alias shows the name alone.
 //
-// Everything but the title, the link, the thumbnail, the colour, the
-// timestamp and the footer goes in the description as one monospace block of
-// labelled rows (see block), so the rows line up the same way on every card.
-// The description ends in padLine, whatever the classification, so every card
-// is drawn at the same width, its length set by whether the card has a
-// thumbnail.
+// In the block style, everything but the title, the link, the thumbnail, the
+// colour, the timestamp and the footer goes in the description as one
+// monospace block of labelled rows (see block), so the rows line up the same
+// way on every card. The description ends in padLine, whatever the
+// classification, so every card is drawn at the same width, its length set by
+// whether the card has a thumbnail. In the fields style, the same items are
+// inline fields (see fields) and there is no description.
 //
 // Render is a pure function of its arguments — posting lives elsewhere in this
 // package — so the layout is covered by golden tests. Every field of a
 // killmail but its ID is optional (see internal/killmail), so each part of the
 // embed is dropped when the payload did not carry it: the embed always
 // renders, and never shows an empty row or a dangling separator.
-func Render(k killmail.Killmail, c killmail.Classification, systemName, alias string) *discordgo.MessageEmbed {
+func Render(k killmail.Killmail, c killmail.Classification, systemName, alias string, style CardStyle) *discordgo.MessageEmbed {
 	embed := &discordgo.MessageEmbed{
-		Type:        discordgo.EmbedTypeRich,
-		Title:       title(k.Victim),
-		URL:         fmt.Sprintf(killURL, k.ID),
-		Color:       color(c),
-		Description: join("\n", block(rows(k, system(systemName, alias))), padLine(k.Victim.ShipTypeID > 0)),
+		Type:  discordgo.EmbedTypeRich,
+		Title: title(k.Victim),
+		URL:   fmt.Sprintf(killURL, k.ID),
+		Color: color(c),
+	}
+	if style == CardStyleFields {
+		embed.Fields = fields(k, fieldsSystem(systemName, alias))
+	} else {
+		embed.Description = join("\n", block(rows(k, system(systemName, alias))), padLine(k.Victim.ShipTypeID > 0))
 	}
 	if k.Victim.ShipTypeID > 0 {
 		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
@@ -116,7 +134,9 @@ func footer(c killmail.Classification) string {
 }
 
 // maxAliasLen caps the alias, in characters, so that one alias cannot wrap
-// into a wall of continuation lines in the block.
+// into a wall of continuation lines in the block, and stays well inside
+// Discord's 1024-character field value limit in the fields style: a field
+// over the limit makes Discord reject the whole embed, and the kill with it.
 const maxAliasLen = 100
 
 // system is the System row's value: the system name, followed by its chain
@@ -308,6 +328,79 @@ func entity(ticker, name, left, right string) string {
 		return name
 	}
 	return join(" ", left+ticker+right, name)
+}
+
+// markdownEscaper backslash-escapes the characters Discord reads as markdown,
+// so that an alias like "A_B_" is not italicised in a field.
+var markdownEscaper = strings.NewReplacer(
+	`\`, `\\`,
+	"*", `\*`,
+	"_", `\_`,
+	"~", `\~`,
+	"`", "\\`",
+	"|", `\|`,
+)
+
+// fieldsSystem is the System field's value: system's, with the alias
+// markdown-escaped, since a field is not monospace and shows markdown.
+func fieldsSystem(name, alias string) string {
+	if name == "" || alias == "" {
+		return name
+	}
+	if r := []rune(alias); len(r) > maxAliasLen {
+		alias = string(r[:maxAliasLen])
+	}
+	return name + " (" + markdownEscaper.Replace(alias) + ")"
+}
+
+// fields builds the fields style's inline fields, in the order the design
+// lays them out. Fields with nothing to say are left out entirely.
+func fields(k killmail.Killmail, systemName string) []*discordgo.MessageEmbedField {
+	var out []*discordgo.MessageEmbedField
+	add := func(name, value string) {
+		if value == "" {
+			return
+		}
+		out = append(out, &discordgo.MessageEmbedField{Name: name, Value: value, Inline: true})
+	}
+
+	add("System", systemName)
+	// A killmail whose payload omitted total_value decodes to 0 ISK, which
+	// says nothing, so the field is dropped rather than claiming a free kill.
+	if k.TotalValue > 0 {
+		add("Value", FormatISK(k.TotalValue)+" ISK")
+	}
+	if k.AttackerCount > 0 {
+		add("Attackers", strconv.Itoa(k.AttackerCount))
+	}
+	// The victim's ship and pilot are already in the title, so this field
+	// carries their affiliation.
+	add("Victim", fieldsAffiliation(k.Victim))
+	add("Final blow", fieldsFinalBlow(k.FinalBlow))
+	return out
+}
+
+// fieldsFinalBlow is finalBlow for the fields style: "Pilot (Ship)" with the
+// affiliation on a single second line.
+func fieldsFinalBlow(p killmail.Party) string {
+	pilot := p.CharName
+	if p.ShipName != "" {
+		if pilot == "" {
+			pilot = p.ShipName
+		} else {
+			pilot += " (" + p.ShipName + ")"
+		}
+	}
+	return join("\n", pilot, fieldsAffiliation(p))
+}
+
+// fieldsAffiliation is affiliation for the fields style, on one line:
+// "[TICKER] Corporation / <TICKER> Alliance".
+func fieldsAffiliation(p killmail.Party) string {
+	return join(" / ",
+		entity(p.CorpTicker, p.CorpName, "[", "]"),
+		entity(p.AllianceTicker, p.AllianceName, "<", ">"),
+	)
 }
 
 // iskUnits are the units FormatISK abbreviates to, smallest first. Each is a

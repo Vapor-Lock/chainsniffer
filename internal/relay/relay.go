@@ -263,7 +263,7 @@ func (r *Relay) handle(ctx context.Context, k killmail.Killmail) error {
 
 	name := r.resolver.Name(ctx, k.SolarSystemID)
 	alias := r.alias(k.SolarSystemID)
-	if err := r.poster.Post(ctx, discord.Render(k, class, name, alias)); err != nil {
+	if err := r.poster.Post(ctx, discord.Render(k, class, name, alias, discord.CardStyleBlock)); err != nil {
 		switch {
 		case ctx.Err() != nil:
 			// A post torn down by shutdown is not a post Discord refused, and
