@@ -1,14 +1,19 @@
-// Package universe resolves EVE Online solar system IDs to system names.
+// Package universe resolves EVE Online IDs to names: solar systems to system
+// names, and corporations and alliances to their names and tickers.
 //
-// Wanderer's kill payload names the system only by `solar_system_id`, so the
-// relay looks the name up in ESI (https://esi.evetech.net), which is public
+// Wanderer's kill payload names the system only by `solar_system_id`, and
+// sometimes carries a corporation or alliance ID without its name or ticker,
+// so the relay looks them up in ESI (https://esi.evetech.net), which is public
 // and needs no authentication.
 //
-// Lookups are deliberately best-effort. A system name is a nicety on an embed,
-// so an unreachable, slow or ignorant ESI falls back to the numeric ID instead
-// of holding up the post (see the discord-killmail-posting spec, "System
-// name"). Only successful lookups are cached, so a system whose name failed to
-// resolve is tried again on the next kill there.
+// Lookups are deliberately best-effort. A name is a nicety on an embed, so an
+// unreachable, slow or ignorant ESI falls back to the numeric system ID, or to
+// leaving the affiliation as the payload had it, instead of holding up the
+// post (see the discord-killmail-posting spec, "System name"). Only
+// successful lookups are cached, so an ID that failed to resolve is tried
+// again on the next kill that carries it. Corporation and alliance names go
+// through a NameCache, which the caller can back with something that outlives
+// the process.
 package universe
 
 import (
@@ -26,8 +31,9 @@ import (
 )
 
 const (
-	// DefaultBaseURL is ESI's versioned base URL. The endpoint used below is
-	// `GET /universe/systems/{id}/`.
+	// DefaultBaseURL is ESI's versioned base URL. The endpoints used below
+	// are `GET /universe/systems/{id}/`, `GET /corporations/{id}/` and
+	// `GET /alliances/{id}/`.
 	DefaultBaseURL = "https://esi.evetech.net/latest"
 
 	// DefaultTimeout caps a single lookup. ESI normally answers well inside
@@ -44,6 +50,30 @@ const (
 	maxBodyBytes = 1 << 16
 )
 
+// The kinds a NameCache is keyed by, alongside the ID.
+const (
+	KindCorporation = "corporation"
+	KindAlliance    = "alliance"
+)
+
+// Entity is the name and ticker of a corporation or an alliance.
+type Entity struct {
+	Name   string
+	Ticker string
+}
+
+// NameCache stores resolved corporation and alliance names and tickers. kind
+// is KindCorporation or KindAlliance. It deals in plain values so that another
+// package can implement it without importing this one. Implementations must
+// be safe for concurrent use.
+//
+// Only successful lookups are Put. A corporation or alliance can be neither
+// renamed nor re-tickered by players, so an entry never goes stale.
+type NameCache interface {
+	Get(kind string, id int64) (name, ticker string, ok bool)
+	Put(kind string, id int64, name, ticker string)
+}
+
 // Resolver resolves solar system IDs to names, caching the ones it has seen.
 // It is safe for concurrent use. The zero value is not usable; call
 // NewResolver.
@@ -55,13 +85,16 @@ type Resolver struct {
 
 	mu    sync.RWMutex
 	names map[int64]string
+
+	entities NameCache
 }
 
 type options struct {
-	baseURL string
-	client  *http.Client
-	timeout time.Duration
-	logger  *slog.Logger
+	baseURL  string
+	client   *http.Client
+	timeout  time.Duration
+	logger   *slog.Logger
+	entities NameCache
 }
 
 // An Option configures a Resolver at NewResolver time.
@@ -107,6 +140,17 @@ func WithLogger(l *slog.Logger) Option {
 	}
 }
 
+// WithNameCache sets where resolved corporation and alliance names are cached.
+// A nil cache keeps the default, an in-memory map that lasts as long as the
+// resolver.
+func WithNameCache(c NameCache) Option {
+	return func(o *options) {
+		if c != nil {
+			o.entities = c
+		}
+	}
+}
+
 // NewResolver returns a resolver with an empty cache.
 //
 // The cache is unbounded on purpose: a chain holds dozens of systems, so the
@@ -121,12 +165,17 @@ func NewResolver(opts ...Option) *Resolver {
 	for _, opt := range opts {
 		opt(&o)
 	}
+	if o.entities == nil {
+		o.entities = &memoryNames{entries: make(map[memoryKey]Entity)}
+	}
 	return &Resolver{
 		baseURL: strings.TrimSuffix(o.baseURL, "/"),
 		client:  o.client,
 		timeout: o.timeout,
 		logger:  o.logger,
 		names:   make(map[int64]string),
+
+		entities: o.entities,
 	}
 }
 
@@ -164,38 +213,111 @@ func (r *Resolver) cached(id int64) (string, bool) {
 	return name, ok
 }
 
-// lookup asks ESI for one system. The timeout is applied on top of ctx, so a
-// shutdown still cancels a lookup in flight.
+// Corporation returns the name and ticker of the corporation with the given
+// ID, and false when it cannot be resolved. An id of zero or less returns
+// false without a request.
+func (r *Resolver) Corporation(ctx context.Context, id int64) (Entity, bool) {
+	return r.entity(ctx, KindCorporation, "corporations", id)
+}
+
+// Alliance returns the name and ticker of the alliance with the given ID, and
+// false when it cannot be resolved. An id of zero or less returns false
+// without a request.
+func (r *Resolver) Alliance(ctx context.Context, id int64) (Entity, bool) {
+	return r.entity(ctx, KindAlliance, "alliances", id)
+}
+
+// entity resolves one corporation or alliance through the name cache, asking
+// ESI's `GET /{collection}/{id}/` on a miss.
+func (r *Resolver) entity(ctx context.Context, kind, collection string, id int64) (Entity, bool) {
+	if id <= 0 {
+		return Entity{}, false
+	}
+	if name, ticker, ok := r.entities.Get(kind, id); ok {
+		return Entity{Name: name, Ticker: ticker}, true
+	}
+
+	var body struct {
+		Name   string `json:"name"`
+		Ticker string `json:"ticker"`
+	}
+	err := r.fetch(ctx, fmt.Sprintf("/%s/%d/", collection, id), &body)
+	if err == nil && (body.Name == "" || body.Ticker == "") {
+		err = fmt.Errorf("the ESI answer lacks the %s name or ticker", kind)
+	}
+	if err != nil {
+		r.logger.Warn("leaving the "+kind+" unresolved", kind+"_id", id, "error", err)
+		return Entity{}, false
+	}
+
+	r.entities.Put(kind, id, body.Name, body.Ticker)
+	return Entity{Name: body.Name, Ticker: body.Ticker}, true
+}
+
+// lookup asks ESI for one system.
 func (r *Resolver) lookup(ctx context.Context, id int64) (string, error) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := r.fetch(ctx, fmt.Sprintf("/universe/systems/%d/", id), &body); err != nil {
+		return "", err
+	}
+	if body.Name == "" {
+		return "", errors.New("the ESI answer carries no system name")
+	}
+	return body.Name, nil
+}
+
+// fetch GETs path below the base URL and decodes the JSON answer into v. The
+// timeout is applied on top of ctx, so a shutdown still cancels a lookup in
+// flight.
+func (r *Resolver) fetch(ctx context.Context, path string, v any) error {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
-	url := fmt.Sprintf("%s/universe/systems/%d/", r.baseURL, id)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.baseURL+path, nil)
 	if err != nil {
-		return "", err
+		return err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", userAgent)
 
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ESI answered %s", resp.Status)
+		return fmt.Errorf("ESI answered %s", resp.Status)
 	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(v); err != nil {
+		return fmt.Errorf("decoding the ESI answer: %w", err)
+	}
+	return nil
+}
 
-	var body struct {
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(&body); err != nil {
-		return "", fmt.Errorf("decoding the ESI answer: %w", err)
-	}
-	if body.Name == "" {
-		return "", errors.New("the ESI answer carries no system name")
-	}
-	return body.Name, nil
+type memoryKey struct {
+	kind string
+	id   int64
+}
+
+// memoryNames is the default NameCache: a map that lasts as long as the
+// resolver.
+type memoryNames struct {
+	mu      sync.RWMutex
+	entries map[memoryKey]Entity
+}
+
+func (m *memoryNames) Get(kind string, id int64) (name, ticker string, ok bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	e, ok := m.entries[memoryKey{kind, id}]
+	return e.Name, e.Ticker, ok
+}
+
+func (m *memoryNames) Put(kind string, id int64, name, ticker string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.entries[memoryKey{kind, id}] = Entity{Name: name, Ticker: ticker}
 }
