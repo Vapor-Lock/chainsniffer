@@ -164,6 +164,7 @@ internal/wanderer   map stream client: requests, backoff, staleness watchdog, fa
 internal/killmail   payload decoding, the Killmail type, classification, filters
 internal/discord    embed rendering, poster (rate limits, retries), channel/permission check
 internal/universe   ESI system-name resolver with an in-memory cache
+internal/eveimage   EVE image server fetcher (portraits, logos) with a bounded in-memory LRU
 internal/state      state.json: last event ID + bounded set of posted killmail IDs
 internal/relay      the pipeline: event -> killmails -> filter/dedupe -> post -> persist cursor
 ```
