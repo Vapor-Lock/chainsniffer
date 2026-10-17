@@ -6,14 +6,14 @@
 // it dispatches on the event type. For each killmail a map_kill event carries
 // it skips the ones already posted, applies the filters, fills in the
 // corporation and alliance names the payload left out, resolves the system
-// name and the chain alias, renders the embed and posts it, recording the kill
-// as posted only once Discord has accepted it. A topology event
-// (deleted_system, connection_added, connection_removed,
+// name and the chain alias, renders the card in the configured style and
+// posts it, recording the kill as posted only once Discord has accepted it. A
+// topology event (deleted_system, connection_added, connection_removed,
 // system_metadata_changed) goes to the [Topology], when one is configured,
 // which keeps the map graph the linked-system filter reads and the chain
-// aliases the [Aliases] answer from. Once the whole event is
-// handled — and not before — the cursor moves to the event's ID and the state
-// is written to disk, whatever the event's type.
+// aliases the [Aliases] answer from. Once the whole event is handled — and
+// not before — the cursor moves to the event's ID and the state is written to
+// disk, whatever the event's type.
 //
 // That order is what makes the relay at-least-once on the stream and
 // at-most-once on Discord: a crash halfway through an event replays the event
@@ -31,9 +31,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
 	"log/slog"
 	"sync"
+	"time"
 
+	"github.com/Vapor-Lock/chainsniffer/internal/cardimage"
 	"github.com/Vapor-Lock/chainsniffer/internal/discord"
 	"github.com/Vapor-Lock/chainsniffer/internal/killmail"
 	"github.com/Vapor-Lock/chainsniffer/internal/universe"
@@ -115,6 +118,30 @@ type Affiliations interface {
 	Alliance(ctx context.Context, id int64) (universe.Entity, bool)
 }
 
+// Images fetches the portraits and logos the strip card style draws.
+//
+// It is internal/eveimage's fetcher. The URL methods return "" for an ID of
+// zero or less, and Fetch returns false for the empty URL and for an image it
+// could not fetch or decode, which the strip draws as a blank tile.
+type Images interface {
+	CharacterPortrait(id int64, size int) string
+	CorporationLogo(id int64, size int) string
+	AllianceLogo(id int64, size int) string
+	Fetch(ctx context.Context, url string) (image.Image, bool)
+}
+
+// The sizes the strip's images are fetched at: the portrait and logo tiles
+// cardimage draws them into.
+const (
+	portraitSize = 128
+	logoSize     = 64
+)
+
+// imageTimeout bounds all of one strip's image fetches together, which run
+// concurrently, so a slow image server delays a card by about this much and
+// the strip then draws blank tiles.
+const imageTimeout = 3 * time.Second
+
 // affiliationTimeout bounds all of one kill's affiliation lookups together,
 // which run concurrently, so a cold kill waits about one lookup at most.
 const affiliationTimeout = universe.DefaultTimeout
@@ -128,11 +155,14 @@ type Relay struct {
 	aliases  Aliases
 	style    discord.CardStyle
 	affils   Affiliations
+	images   Images
 
 	friendlies killmail.Friendlies
 	filters    killmail.Filters
 	logger     *slog.Logger
 	fatalPost  func(error) bool
+	// drawStrip is cardimage.Strip, replaced in tests to make it fail.
+	drawStrip func(cardimage.StripInput) ([]byte, error)
 }
 
 type options struct {
@@ -140,6 +170,7 @@ type options struct {
 	aliases    Aliases
 	style      discord.CardStyle
 	affils     Affiliations
+	images     Images
 	friendlies killmail.Friendlies
 	filters    killmail.Filters
 	logger     *slog.Logger
@@ -184,6 +215,12 @@ func WithCardStyle(s discord.CardStyle) Option {
 // shows only the names the payload carried.
 func WithAffiliations(a Affiliations) Option {
 	return func(o *options) { o.affils = a }
+}
+
+// WithImages sets where the strip card style's portraits and logos are
+// fetched. Without one, or with a nil one, a strip draws every tile blank.
+func WithImages(i Images) Option {
+	return func(o *options) { o.images = i }
 }
 
 // WithLogger sets the logger the pipeline reports on. A nil logger keeps
@@ -231,10 +268,12 @@ func New(poster Poster, resolver Resolver, store Store, opts ...Option) (*Relay,
 		aliases:    o.aliases,
 		style:      o.style,
 		affils:     o.affils,
+		images:     o.images,
 		friendlies: o.friendlies,
 		filters:    o.filters,
 		logger:     o.logger,
 		fatalPost:  o.fatalPost,
+		drawStrip:  cardimage.Strip,
 	}, nil
 }
 
@@ -301,7 +340,7 @@ func (r *Relay) handle(ctx context.Context, k killmail.Killmail) error {
 	r.enrich(ctx, &k)
 	name := r.resolver.Name(ctx, k.SolarSystemID)
 	alias := r.alias(k.SolarSystemID)
-	if err := r.poster.Post(ctx, discord.Message{Embed: discord.Render(k, class, name, alias, r.style)}); err != nil {
+	if err := r.poster.Post(ctx, r.message(ctx, k, class, name, alias)); err != nil {
 		switch {
 		case ctx.Err() != nil:
 			// A post torn down by shutdown is not a post Discord refused, and
@@ -327,6 +366,86 @@ func (r *Relay) handle(ctx context.Context, k killmail.Killmail) error {
 	}
 	r.logger.Info("posted killmail", attrs...)
 	return nil
+}
+
+// message builds the card for one kill in the configured style.
+func (r *Relay) message(ctx context.Context, k killmail.Killmail, class killmail.Classification, name, alias string) discord.Message {
+	switch r.style {
+	case discord.CardStyleComponents:
+		return discord.ComponentsMessage(k, class, name, alias)
+	case discord.CardStyleStrip:
+		embed := discord.Render(k, class, name, alias, discord.CardStyleBlock)
+		png, err := r.drawStrip(r.stripInput(ctx, k))
+		if err != nil {
+			// The strip is decoration: the block card says everything it does.
+			r.logger.Warn("posting the block card without its strip", "killmail_id", k.ID, "error", err)
+			return discord.Message{Embed: embed}
+		}
+		return discord.StripMessage(embed, png)
+	default:
+		return discord.Message{Embed: discord.Render(k, class, name, alias, r.style)}
+	}
+}
+
+// Text fallbacks for the strip, matching the cards' own.
+const (
+	unknownPilot = "Unknown pilot"
+	unknownShip  = "Unknown ship"
+)
+
+// stripInput is what the strip draws for k: each party's text, with the
+// fallbacks applied, and their portrait and logos, fetched concurrently under
+// one context bounded by imageTimeout. Only IDs the payload gives are fetched;
+// a missing or failed image is nil, a blank tile.
+func (r *Relay) stripInput(ctx context.Context, k killmail.Killmail) cardimage.StripInput {
+	in := cardimage.StripInput{
+		Victim: cardimage.Party{
+			Name: orElse(orElse(k.Victim.CharName, k.Victim.CorpName), unknownPilot),
+			Hull: orElse(k.Victim.ShipName, unknownShip),
+		},
+		Attacker: cardimage.Party{
+			// A final blow without a character is an NPC, named by its ship.
+			Name: orElse(k.FinalBlow.CharName, k.FinalBlow.ShipName),
+			Hull: orElse(k.FinalBlow.ShipName, unknownShip),
+		},
+	}
+	if r.images == nil {
+		return in
+	}
+	ctx, cancel := context.WithTimeout(ctx, imageTimeout)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	fetch := func(url string, dst *image.Image) {
+		if url == "" {
+			return
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if img, ok := r.images.Fetch(ctx, url); ok {
+				*dst = img
+			}
+		}()
+	}
+	for _, side := range []struct {
+		p   killmail.Party
+		dst *cardimage.Party
+	}{{k.Victim, &in.Victim}, {k.FinalBlow, &in.Attacker}} {
+		fetch(r.images.CharacterPortrait(side.p.CharID, portraitSize), &side.dst.Portrait)
+		fetch(r.images.CorporationLogo(side.p.CorpID, logoSize), &side.dst.Corp)
+		fetch(r.images.AllianceLogo(side.p.AllianceID, logoSize), &side.dst.Alliance)
+	}
+	wg.Wait()
+	return in
+}
+
+// orElse returns s, or fallback when s is empty.
+func orElse(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
 }
 
 // enrich fills in the corporation and alliance names and tickers that the

@@ -13,11 +13,25 @@ One process serves one map and one channel.
 
 ## What a post looks like
 
-Each killmail becomes an embed, in one of two card styles chosen by `CHAINSNIFFER_CARD_STYLE`. The
-`block` style, the default, sets the details in an aligned monospace block and gives every card the
-same width. The `fields` style shows them as Discord inline fields instead, the layout chainsniffer
-used before the block; its cards are as wide as their content. Both share the title, thumbnail,
-color, footer and timestamp:
+Each killmail becomes a card, in one of four styles chosen by `CHAINSNIFFER_CARD_STYLE`:
+
+- **`strip`**, the default: the `block` card with a picture under it, a dark strip showing the
+  victim on the left and the final blow on the right, each with their portrait, their corporation
+  and alliance logos at the outer edge, and their name above their hull. chainsniffer draws the
+  strip itself from the [EVE image server](https://images.evetech.net) and uploads it with the
+  card, so this style needs the **Attach Files** permission. An image that cannot be fetched within
+  a few seconds is left as a blank tile, and a strip that cannot be drawn at all is logged and the
+  card goes out as a plain `block` card.
+- **`block`** sets the details in an aligned monospace block and gives every card the same width.
+- **`fields`** shows them as Discord inline fields instead, the layout chainsniffer used before the
+  block; its cards are as wide as their content.
+- **`components`** is a native Discord components card: the title beside the ship render, the
+  `block` style's monospace block, then a section each for the victim and the final blow with
+  their name, hull and tickers beside their alliance logo (else corporation logo, else portrait),
+  and the kill time in the reader's own time zone. Discord fetches its images itself.
+
+The three embed styles, `strip`, `block` and `fields`, share the title, thumbnail, color, footer and
+timestamp:
 
 - **Title:** `<victim ship> — <victim name | corp name>`, linked to the kill on zKillboard.
 - **Thumbnail:** a render of the victim's ship.
@@ -70,15 +84,20 @@ it, or the one entry, if CCP ever force-renames a corporation the cache already 
 
 1. Create an application at the [Discord Developer Portal](https://discord.com/developers/applications),
    add a bot to it, and copy the **bot token**. This is `CHAINSNIFFER_DISCORD_TOKEN`.
-2. Invite the bot to your server and give it these three permissions on the target channel:
-   **View Channel**, **Send Messages** and **Embed Links**. Nothing else is needed — the bot only
-   writes, and it requests no gateway intents.
+2. Invite the bot to your server and give it these permissions on the target channel:
+   **View Channel**, **Send Messages**, **Embed Links** and, for the default `strip` card style,
+   **Attach Files**. Nothing else is needed — the bot only writes, and it requests no gateway
+   intents. To run without Attach Files, set `CHAINSNIFFER_CARD_STYLE=block`.
 3. Turn on Developer Mode in Discord (*Settings → Advanced*), right-click the channel and
    **Copy Channel ID**. This is `CHAINSNIFFER_DISCORD_CHANNEL_ID`.
 
 chainsniffer checks all of this at startup: it verifies the token, resolves the channel, and
-reports any of the three permissions it is missing, before it subscribes to the stream. A rejected
+reports any of those permissions it is missing, before it subscribes to the stream. A rejected
 token or an unreachable channel exits 1 rather than retrying forever.
+
+> **Upgrading:** `strip` became the default card style, and with it Attach Files a required
+> permission. A bot set up before then stops at the startup check naming the missing permission:
+> grant Attach Files on the channel, or set `CHAINSNIFFER_CARD_STYLE=block` to keep the old cards.
 
 ### 2. The Wanderer map
 
@@ -161,7 +180,7 @@ stream connects exits 1, home system or not, as it does for the stream.
 | `CHAINSNIFFER_STATE_DIR` | `/var/lib/chainsniffer` | Directory holding `state.json` and the `names.json` name cache. Must be writable. |
 | `CHAINSNIFFER_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 | `CHAINSNIFFER_LOG_FORMAT` | `text` | `text` or `json`. |
-| `CHAINSNIFFER_CARD_STYLE` | `block` | Kill card layout: `block` (aligned monospace details, uniform width) or `fields` (inline fields, the older layout). Case-insensitive. |
+| `CHAINSNIFFER_CARD_STYLE` | `strip` | Kill card layout: `strip` (the `block` card with a portrait strip image; needs Attach Files), `block` (aligned monospace details, uniform width), `fields` (inline fields, the older layout) or `components` (a native Discord components card). Case-insensitive. |
 
 ### Secrets from files
 
@@ -340,8 +359,10 @@ hash mismatch. To update it:
 | `internal/sse` | A generic SSE reader: framing only, `io.Reader` to events. |
 | `internal/wanderer` | The map stream client: requests, backoff, staleness watchdog, fatal statuses. |
 | `internal/killmail` | Payload decoding, the `Killmail` type, classification, filters. |
-| `internal/discord` | Embed rendering, the poster (rate limits, retries), the startup check. |
+| `internal/discord` | Embed and components card rendering, the poster (rate limits, retries, file uploads), the startup check. |
 | `internal/universe` | The ESI resolver for system, corporation and alliance names, and its caches. |
+| `internal/eveimage` | The EVE image server fetcher for portraits and logos, with an in-memory cache. |
+| `internal/cardimage` | Draws the `strip` card's portrait strip PNG. |
 | `internal/state` | `state.json` and the bounded set of posted killmail IDs; the `names.json` name cache. |
 | `internal/relay` | The pipeline: event to killmails to filter, dedupe, post, persist. |
 

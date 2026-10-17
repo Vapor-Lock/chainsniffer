@@ -30,6 +30,7 @@ import (
 
 	"github.com/Vapor-Lock/chainsniffer/internal/config"
 	"github.com/Vapor-Lock/chainsniffer/internal/discord"
+	"github.com/Vapor-Lock/chainsniffer/internal/eveimage"
 	"github.com/Vapor-Lock/chainsniffer/internal/killmail"
 	"github.com/Vapor-Lock/chainsniffer/internal/relay"
 	"github.com/Vapor-Lock/chainsniffer/internal/state"
@@ -65,6 +66,7 @@ func main() {
 type options struct {
 	discordBaseURL string
 	esiBaseURL     string
+	imageBaseURL   string
 }
 
 // An option overrides one default in [run].
@@ -78,6 +80,12 @@ func withDiscordBaseURL(url string) option {
 // withESIBaseURL sends the ESI name lookups to another ESI root.
 func withESIBaseURL(url string) option {
 	return func(o *options) { o.esiBaseURL = url }
+}
+
+// withImageBaseURL fetches the strip's portraits and logos from another image
+// server.
+func withImageBaseURL(url string) option {
+	return func(o *options) { o.imageBaseURL = url }
 }
 
 // run is main with its environment, its output and its lifetime passed in. It
@@ -156,6 +164,9 @@ func serve(ctx context.Context, logger *slog.Logger, cfg *config.Config, o optio
 		relay.WithFriendlies(killmail.NewFriendlies(cfg.FriendlyCorpIDs, cfg.FriendlyAllianceIDs)),
 		relay.WithCardStyle(discord.CardStyle(cfg.CardStyle)),
 		relay.WithLogger(logger),
+	}
+	if cfg.CardStyle == config.CardStyleStrip {
+		relayOpts = append(relayOpts, relay.WithImages(newImages(logger, o)))
 	}
 	clientOpts := []wanderer.Option{wanderer.WithLogger(logger)}
 
@@ -328,7 +339,11 @@ func newLogger(w io.Writer, cfg *config.Config) *slog.Logger {
 
 // newPoster builds the Discord poster the relay posts through.
 func newPoster(cfg *config.Config, logger *slog.Logger, o options) (*discord.Poster, error) {
-	opts := []discord.Option{discord.WithLogger(logger)}
+	// Only the strip style uploads a file, so only it needs Attach Files.
+	opts := []discord.Option{
+		discord.WithLogger(logger),
+		discord.WithAttachFiles(cfg.CardStyle == config.CardStyleStrip),
+	}
 	if o.discordBaseURL != "" {
 		opts = append(opts, discord.WithBaseURL(o.discordBaseURL))
 	}
@@ -343,4 +358,14 @@ func newResolver(logger *slog.Logger, o options, extra ...universe.Option) *univ
 		opts = append(opts, universe.WithBaseURL(o.esiBaseURL))
 	}
 	return universe.NewResolver(opts...)
+}
+
+// newImages builds the EVE image fetcher the strip's portraits and logos come
+// from.
+func newImages(logger *slog.Logger, o options) *eveimage.Fetcher {
+	opts := []eveimage.Option{eveimage.WithLogger(logger)}
+	if o.imageBaseURL != "" {
+		opts = append(opts, eveimage.WithBaseURL(o.imageBaseURL))
+	}
+	return eveimage.New(opts...)
 }

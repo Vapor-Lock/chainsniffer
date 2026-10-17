@@ -83,7 +83,7 @@ func TestRelayPostsFiltersAndResumes(t *testing.T) {
 	first, firstURL := newFakeWanderer(t, killFrame(firstEventID,
 		killmailJSON(npcKillID, true), killmailJSON(postedKillID, false)))
 
-	logs, stop := startRelay(t, testEnv(dir, firstURL), withDiscordBaseURL(discordURL), withESIBaseURL(esi))
+	logs, stop := startRelay(t, testEnv(dir, firstURL), withDiscordBaseURL(discordURL), withESIBaseURL(esi), withImageBaseURL(noImages(t)))
 	waitFor(t, "the first event to be recorded", func() bool {
 		return readState(t, dir).LastEventID == firstEventID
 	})
@@ -103,6 +103,11 @@ func TestRelayPostsFiltersAndResumes(t *testing.T) {
 	}
 	if !hasSystemRow(posts[0], testSystemName) {
 		t.Errorf("posted embed has no System row naming %q:\n%s", testSystemName, posts[0].Description)
+	}
+	// strip is the default style, and the strip goes out with blank tiles
+	// when the image server has nothing.
+	if posts[0].Image == nil || posts[0].Image.URL != "attachment://kill.png" {
+		t.Errorf("posted embed image = %+v, want the strip, attachment://kill.png", posts[0].Image)
 	}
 
 	// The state is what makes the restart below safe: the cursor to resume
@@ -131,7 +136,7 @@ func TestRelayPostsFiltersAndResumes(t *testing.T) {
 	// killmail the first run already posted.
 	second, secondURL := newFakeWanderer(t, killFrame(secondEventID, killmailJSON(postedKillID, false)))
 
-	logs, stop = startRelay(t, testEnv(dir, secondURL), withDiscordBaseURL(discordURL), withESIBaseURL(esi))
+	logs, stop = startRelay(t, testEnv(dir, secondURL), withDiscordBaseURL(discordURL), withESIBaseURL(esi), withImageBaseURL(noImages(t)))
 	waitFor(t, "the second event to be recorded", func() bool {
 		return readState(t, dir).LastEventID == secondEventID
 	})
@@ -206,7 +211,7 @@ func TestRelayFiltersToTheHomeChain(t *testing.T) {
 
 	vars := testEnv(dir, wandererURL)
 	vars[config.EnvHomeSystemID] = fmt.Sprint(homeSystemID)
-	logs, stop := startRelay(t, vars, withDiscordBaseURL(discordURL), withESIBaseURL(esi))
+	logs, stop := startRelay(t, vars, withDiscordBaseURL(discordURL), withESIBaseURL(esi), withImageBaseURL(noImages(t)))
 	waitFor(t, "the last event to be recorded", func() bool {
 		return readState(t, dir).LastEventID == cutOffEventID
 	})
@@ -286,7 +291,7 @@ func TestRelayShowsTheChainAlias(t *testing.T) {
 			if tc.home {
 				vars[config.EnvHomeSystemID] = fmt.Sprint(homeSystemID)
 			}
-			logs, stop := startRelay(t, vars, withDiscordBaseURL(discordURL), withESIBaseURL(esi))
+			logs, stop := startRelay(t, vars, withDiscordBaseURL(discordURL), withESIBaseURL(esi), withImageBaseURL(noImages(t)))
 			waitFor(t, "the last event to be recorded", func() bool {
 				return readState(t, dir).LastEventID == islandEventID
 			})
@@ -335,7 +340,7 @@ func TestRelayExitsZeroOnSIGTERM(t *testing.T) {
 	discordFake, discordURL := newFakeDiscord(t)
 	_, wandererURL := newFakeWanderer(t, killFrame(firstEventID, killmailJSON(postedKillID, false)))
 
-	logs, codes := runRelay(t, testEnv(dir, wandererURL), withDiscordBaseURL(discordURL), withESIBaseURL(esi))
+	logs, codes := runRelay(t, testEnv(dir, wandererURL), withDiscordBaseURL(discordURL), withESIBaseURL(esi), withImageBaseURL(noImages(t)))
 
 	// Waiting for the post proves the relay is past the point where it
 	// installs its signal handler, so the signal cannot reach a process that
@@ -437,7 +442,7 @@ func TestRunExitsOneOnFatalFailures(t *testing.T) {
 			vars := testEnv(t.TempDir(), wandererURL)
 			tc.setup(t, vars, discordFake, wandererFake)
 
-			logs, codes := runRelay(t, vars, withDiscordBaseURL(discordURL), withESIBaseURL(esi))
+			logs, codes := runRelay(t, vars, withDiscordBaseURL(discordURL), withESIBaseURL(esi), withImageBaseURL(noImages(t)))
 			if code := wait(t, codes); code != exitFailure {
 				t.Errorf("run() = %d, want %d; logs:\n%s", code, exitFailure, logs)
 			}
@@ -463,7 +468,7 @@ func TestRelayResyncsTheTopology(t *testing.T) {
 	vars := testEnv(dir, wandererURL)
 	vars[config.EnvHomeSystemID] = fmt.Sprint(homeSystemID)
 	vars[config.EnvTopologyResyncInterval] = "20ms"
-	logs, stop := startRelay(t, vars, withDiscordBaseURL(discordURL), withESIBaseURL(esi))
+	logs, stop := startRelay(t, vars, withDiscordBaseURL(discordURL), withESIBaseURL(esi), withImageBaseURL(noImages(t)))
 	waitFor(t, "a periodic reload to fail", func() bool {
 		return strings.Contains(logs.String(), "reloading the map topology failed")
 	})
@@ -497,6 +502,15 @@ func testEnv(stateDir, wandererURL string) map[string]string {
 		config.EnvLogLevel:        "debug",
 		config.EnvLogFormat:       "json",
 	}
+}
+
+// noImages returns the root of an image server that has no images, so the
+// strip draws blank tiles without the test dialling out.
+func noImages(t *testing.T) string {
+	t.Helper()
+	server := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(server.Close)
+	return server.URL
 }
 
 // lookup turns an environment map into what config.Load reads.
@@ -956,7 +970,7 @@ func (f *fakeDiscord) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ID:      testGuildID,
 			OwnerID: "999999999999999999",
 			Roles: []*discordgo.Role{{ID: testGuildID, Name: "@everyone", Permissions: discordgo.PermissionViewChannel |
-				discordgo.PermissionSendMessages | discordgo.PermissionEmbedLinks}},
+				discordgo.PermissionSendMessages | discordgo.PermissionEmbedLinks | discordgo.PermissionAttachFiles}},
 		})
 
 	case r.Method == http.MethodGet && path == "guilds/"+testGuildID+"/members/"+testBotID:
@@ -970,12 +984,21 @@ func (f *fakeDiscord) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handlePost accepts one message, recording the embed it carried.
+// handlePost accepts one message, recording the embed it carried. A message
+// with files, the strip card's, is multipart with its JSON in payload_json.
 func (f *fakeDiscord) handlePost(w http.ResponseWriter, r *http.Request) {
 	var sent struct {
 		Embeds []*discordgo.MessageEmbed `json:"embeds"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+	var body io.Reader = r.Body
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"message": "undecodable multipart body"})
+			return
+		}
+		body = strings.NewReader(r.FormValue("payload_json"))
+	}
+	if err := json.NewDecoder(body).Decode(&sent); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "undecodable body"})
 		return
 	}

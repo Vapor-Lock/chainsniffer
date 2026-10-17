@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -15,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Vapor-Lock/chainsniffer/internal/cardimage"
 	"github.com/Vapor-Lock/chainsniffer/internal/discord"
 	"github.com/Vapor-Lock/chainsniffer/internal/killmail"
 	"github.com/Vapor-Lock/chainsniffer/internal/universe"
@@ -29,9 +32,10 @@ const (
 	systemName = "J123456"
 )
 
-// fakePoster records the embeds it accepted, in order.
+// fakePoster records the messages it accepted, and their embeds, in order.
 type fakePoster struct {
-	embeds []*discordgo.MessageEmbed
+	messages []discord.Message
+	embeds   []*discordgo.MessageEmbed
 
 	// fail is consulted for every call, numbered from one. A non-nil error it
 	// returns is what Post returns, and the embed is not recorded.
@@ -46,6 +50,7 @@ func (p *fakePoster) Post(_ context.Context, msg discord.Message) error {
 			return err
 		}
 	}
+	p.messages = append(p.messages, msg)
 	p.embeds = append(p.embeds, msg.Embed)
 	return nil
 }
@@ -910,5 +915,165 @@ func TestHandleLeavesAffiliationsAloneWithoutAResolver(t *testing.T) {
 
 	if desc := f.poster.embeds[0].Description; strings.Contains(desc, "Victim     ") {
 		t.Errorf("embed has a Victim row without a resolver:\n%s", desc)
+	}
+}
+
+// fakeImages serves a blank image for every URL except the ones in fail, and
+// records every URL it was asked to fetch. URLs are "kind/id/size", or "" for
+// an ID of zero or less, as internal/eveimage's are.
+type fakeImages struct {
+	mu      sync.Mutex
+	fail    map[string]bool
+	fetched []string
+}
+
+func (i *fakeImages) url(kind string, id int64, size int) string {
+	if id <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s/%d/%d", kind, id, size)
+}
+
+func (i *fakeImages) CharacterPortrait(id int64, size int) string {
+	return i.url("character", id, size)
+}
+func (i *fakeImages) CorporationLogo(id int64, size int) string {
+	return i.url("corporation", id, size)
+}
+func (i *fakeImages) AllianceLogo(id int64, size int) string { return i.url("alliance", id, size) }
+
+func (i *fakeImages) Fetch(_ context.Context, url string) (image.Image, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.fetched = append(i.fetched, url)
+	if url == "" || i.fail[url] {
+		return nil, false
+	}
+	return image.NewRGBA(image.Rect(0, 0, 8, 8)), true
+}
+
+// partyIDs gives the victim and the final blow a character and a
+// corporation, and the victim an alliance.
+var partyIDs = map[string]any{
+	"victim_char_id":         90000001,
+	"victim_corp_id":         98000001,
+	"victim_alliance_id":     99000001,
+	"final_blow_char_id":     90000002,
+	"final_blow_corp_id":     98000002,
+	"final_blow_char_name":   "Killer",
+	"final_blow_ship_name":   "Sabre",
+	"final_blow_alliance_id": 0,
+}
+
+// wantStrip checks that msg is the strip card: the block embed showing a PNG
+// attached as kill.png.
+func wantStrip(t *testing.T, msg discord.Message) {
+	t.Helper()
+	if msg.Embed == nil || msg.Embed.Description == "" {
+		t.Fatalf("strip card embed = %+v, want the block embed", msg.Embed)
+	}
+	if msg.Embed.Image == nil || msg.Embed.Image.URL != "attachment://kill.png" {
+		t.Errorf("strip card image = %+v, want attachment://kill.png", msg.Embed.Image)
+	}
+	if len(msg.Files) != 1 || msg.Files[0].Name != "kill.png" {
+		t.Fatalf("strip card files = %+v, want kill.png alone", msg.Files)
+	}
+	if _, err := png.Decode(bytes.NewReader(msg.Files[0].Data)); err != nil {
+		t.Errorf("kill.png does not decode as a PNG: %v", err)
+	}
+}
+
+func TestHandlePostsTheStripWithItsImages(t *testing.T) {
+	images := &fakeImages{}
+	f := newFixture(t, WithCardStyle(discord.CardStyleStrip), WithImages(images))
+
+	f.handle(t, envelope(t, "01JB", kill(1, partyIDs)))
+
+	wantPosted(t, f, 1)
+	wantStrip(t, f.poster.messages[0])
+	slices.Sort(images.fetched)
+	want := []string{
+		"alliance/99000001/64",
+		"character/90000001/128", "character/90000002/128",
+		"corporation/98000001/64", "corporation/98000002/64",
+	}
+	if !slices.Equal(images.fetched, want) {
+		t.Errorf("fetched %q, want %q (only the IDs the payload gives)", images.fetched, want)
+	}
+}
+
+func TestHandlePostsTheStripWhenImagesFail(t *testing.T) {
+	images := &fakeImages{fail: map[string]bool{
+		"character/90000001/128": true, "corporation/98000002/64": true,
+	}}
+	f := newFixture(t, WithCardStyle(discord.CardStyleStrip), WithImages(images))
+
+	f.handle(t, envelope(t, "01JB", kill(1, partyIDs)))
+
+	wantPosted(t, f, 1)
+	wantStrip(t, f.poster.messages[0])
+}
+
+func TestHandlePostsTheStripWithoutImages(t *testing.T) {
+	f := newFixture(t, WithCardStyle(discord.CardStyleStrip))
+
+	f.handle(t, envelope(t, "01JB", kill(1, partyIDs)))
+
+	wantPosted(t, f, 1)
+	wantStrip(t, f.poster.messages[0])
+}
+
+func TestHandleFallsBackToTheBlockCardWhenTheStripFails(t *testing.T) {
+	f := newFixture(t, WithCardStyle(discord.CardStyleStrip), WithImages(&fakeImages{}))
+	f.relay.drawStrip = func(cardimage.StripInput) ([]byte, error) { return nil, errors.New("no fonts") }
+
+	f.handle(t, envelope(t, "01JB", kill(1, partyIDs)))
+
+	wantPosted(t, f, 1)
+	msg := f.poster.messages[0]
+	if msg.Embed.Description == "" || msg.Embed.Image != nil || len(msg.Files) != 0 {
+		t.Errorf("fallback card = embed %+v, %d files; want the block embed with no image or files", msg.Embed, len(msg.Files))
+	}
+	if !strings.Contains(f.logs.String(), "level=WARN") || !strings.Contains(f.logs.String(), "no fonts") {
+		t.Errorf("logs do not warn about the strip:\n%s", f.logs)
+	}
+}
+
+func TestHandleAppliesTheStripTextFallbacks(t *testing.T) {
+	var got cardimage.StripInput
+	f := newFixture(t, WithCardStyle(discord.CardStyleStrip))
+	f.relay.drawStrip = func(in cardimage.StripInput) ([]byte, error) {
+		got = in
+		return cardimage.Strip(in)
+	}
+
+	f.handle(t, envelope(t, "01JB", kill(1, map[string]any{
+		"victim_char_name": "", "victim_ship_name": "", "final_blow_ship_name": "Guristas Eradicator",
+	})))
+
+	want := cardimage.StripInput{
+		Victim:   cardimage.Party{Name: "Unknown pilot", Hull: "Unknown ship"},
+		Attacker: cardimage.Party{Name: "Guristas Eradicator", Hull: "Guristas Eradicator"},
+	}
+	if got != want {
+		t.Errorf("strip input = %+v, want %+v", got, want)
+	}
+}
+
+func TestHandlePostsComponents(t *testing.T) {
+	f := newFixture(t, WithCardStyle(discord.CardStyleComponents), WithImages(&fakeImages{}))
+
+	f.handle(t, envelope(t, "01JB", kill(1, partyIDs)))
+
+	if len(f.poster.messages) != 1 {
+		t.Fatalf("posted %d messages, want 1", len(f.poster.messages))
+	}
+	msg := f.poster.messages[0]
+	if msg.Embed != nil || len(msg.Files) != 0 || len(msg.Components) == 0 {
+		t.Errorf("components card = embed %+v, %d files, %d components; want components alone",
+			msg.Embed, len(msg.Files), len(msg.Components))
+	}
+	if !f.store.Posted(1) {
+		t.Error("the components card was not recorded as posted")
 	}
 }
