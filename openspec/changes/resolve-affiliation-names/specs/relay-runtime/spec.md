@@ -3,8 +3,8 @@
 ## ADDED Requirements
 
 ### Requirement: Persistent name cache
-The relay SHALL keep every corporation and alliance name and ticker it resolves in a JSON file
-`names.json` in the state directory, and SHALL NOT look up an ID found there again, including after
+The relay SHALL keep every corporation and alliance name and ticker, and every character name, it
+resolves in a JSON file `names.json` in the state directory, and SHALL NOT look up an ID found there again, including after
 a restart. Entries SHALL never expire. A missing `names.json` SHALL start an empty cache; an
 unreadable one SHALL be moved aside as `names.json.corrupt` with a warning and replaced by an empty
 cache. Neither SHALL affect `state.json`.

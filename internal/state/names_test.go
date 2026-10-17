@@ -47,12 +47,34 @@ func TestNamesRoundTripAcrossReopen(t *testing.T) {
 	n := testNames(t, dir)
 	n.Put(KindCorporation, 98735003, "Vapor Lock", "VAPOR")
 	n.Put(KindAlliance, 99014747, "Some Alliance", "SA")
+	n.Put(KindCharacter, 2124740911, "Unlucky Miner", "")
 
 	reopened := testNames(t, dir)
 	wantName(t, reopened, KindCorporation, 98735003, "Vapor Lock", "VAPOR")
 	wantName(t, reopened, KindAlliance, 99014747, "Some Alliance", "SA")
+	wantName(t, reopened, KindCharacter, 2124740911, "Unlucky Miner", "")
 	if _, _, ok := reopened.Get(KindAlliance, 98735003); ok {
 		t.Error("a corporation ID was found among the alliances")
+	}
+	if _, _, ok := reopened.Get(KindCorporation, 2124740911); ok {
+		t.Error("a character ID was found among the corporations")
+	}
+}
+
+func TestNamesFileWithoutCharactersLoads(t *testing.T) {
+	dir := t.TempDir()
+	// The shape names.json had before characters were cached.
+	old := `{"corporations":{"98735003":{"name":"Vapor Lock","ticker":"VAPOR"}},"alliances":{}}`
+	if err := os.WriteFile(filepath.Join(dir, NamesFileName), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	n := testNames(t, dir)
+	wantName(t, n, KindCorporation, 98735003, "Vapor Lock", "VAPOR")
+	n.Put(KindCharacter, 2124740911, "Unlucky Miner", "")
+	wantName(t, testNames(t, dir), KindCharacter, 2124740911, "Unlucky Miner", "")
+	if _, err := os.Stat(filepath.Join(dir, namesCorruptName)); !os.IsNotExist(err) {
+		t.Errorf("the old file was moved aside (stat error %v)", err)
 	}
 }
 
@@ -161,8 +183,8 @@ func TestNamesFailedWriteKeepsEntryInMemory(t *testing.T) {
 func TestNamesUnknownKind(t *testing.T) {
 	dir := t.TempDir()
 	n := testNames(t, dir)
-	n.Put("character", 1, "Someone", "")
-	if _, _, ok := n.Get("character", 1); ok {
+	n.Put("faction", 1, "Someone", "")
+	if _, _, ok := n.Get("faction", 1); ok {
 		t.Error("Get returned an entry of an unknown kind")
 	}
 	if _, err := os.Stat(n.Path()); !os.IsNotExist(err) {

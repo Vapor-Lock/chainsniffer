@@ -21,6 +21,10 @@ only because their payloads happened to carry the names.
   ticker is kept for good: in memory, and in a `names.json` file in the state directory, so a
   restart does not ask ESI again. The file is a cache only. A missing or corrupt `names.json`
   starts empty and never affects the cursor or the posted-kill record in `state.json`.
+- The same goes for a victim or final-blow character ID without a name, which the live check found
+  (kill 139233228): the relay looks the name up from ESI's `/characters/{id}/` and keeps it in
+  `names.json` too. The `block` card's Victim row then names the pilot above the corporation and
+  alliance, as the Final blow row does.
 - Lookups are bounded by a short timeout, like system names. A lookup that fails or times out
   leaves that line out, and the kill is still posted. Failures are not cached.
 - Classification and filters keep using only the IDs in the payload. The lookups only add display
@@ -35,14 +39,16 @@ None.
 ### Modified Capabilities
 
 - `discord-killmail-posting`: adds an "Affiliation names" requirement. It makes the card show
-  corporation and alliance names and tickers that the payload identifies only by ID, on the same
-  best-effort, bounded-delay terms as "System name".
+  corporation and alliance names and tickers, and character names, that the payload identifies
+  only by ID, on the same best-effort, bounded-delay terms as "System name"; and a "Victim row names
+  the pilot" requirement for the `block` card.
 - `relay-runtime`: adds a "Persistent name cache" requirement for `names.json` in the state
   directory.
 
 ## Impact
 
-- `internal/universe`: corporation and alliance lookups alongside the system-name resolver, with
+- `internal/discord`: the `block` Victim row gains the pilot's name.
+- `internal/universe`: character, corporation and alliance lookups alongside the system-name resolver, with
   the same timeout and logging behaviour, backed by a cache interface the package declares.
 - `internal/state`: a `names.json` store that implements that cache, written atomically when a new
   name is learned.

@@ -1,8 +1,10 @@
 // Package universe resolves EVE Online IDs to names: solar systems to system
-// names, and corporations and alliances to their names and tickers.
+// names, corporations and alliances to their names and tickers, and
+// characters to their names.
 //
 // Wanderer's kill payload names the system only by `solar_system_id`, and
-// sometimes carries a corporation or alliance ID without its name or ticker,
+// sometimes carries a character, corporation or alliance ID without its name
+// or ticker,
 // so the relay looks them up in ESI (https://esi.evetech.net), which is public
 // and needs no authentication.
 //
@@ -11,8 +13,8 @@
 // leaving the affiliation as the payload had it, instead of holding up the
 // post (see the discord-killmail-posting spec, "System name"). Only
 // successful lookups are cached, so an ID that failed to resolve is tried
-// again on the next kill that carries it. Corporation and alliance names go
-// through a NameCache, which the caller can back with something that outlives
+// again on the next kill that carries it. Character, corporation and alliance
+// names go through a NameCache, which the caller can back with something that outlives
 // the process.
 package universe
 
@@ -32,8 +34,8 @@ import (
 
 const (
 	// DefaultBaseURL is ESI's versioned base URL. The endpoints used below
-	// are `GET /universe/systems/{id}/`, `GET /corporations/{id}/` and
-	// `GET /alliances/{id}/`.
+	// are `GET /universe/systems/{id}/`, `GET /corporations/{id}/`,
+	// `GET /alliances/{id}/` and `GET /characters/{id}/`.
 	DefaultBaseURL = "https://esi.evetech.net/latest"
 
 	// DefaultTimeout caps a single lookup. ESI normally answers well inside
@@ -54,21 +56,24 @@ const (
 const (
 	KindCorporation = "corporation"
 	KindAlliance    = "alliance"
+	KindCharacter   = "character"
 )
 
-// Entity is the name and ticker of a corporation or an alliance.
+// Entity is the name and ticker of a corporation or an alliance, or the name
+// of a character, whose Ticker is empty.
 type Entity struct {
 	Name   string
 	Ticker string
 }
 
-// NameCache stores resolved corporation and alliance names and tickers. kind
-// is KindCorporation or KindAlliance. It deals in plain values so that another
+// NameCache stores resolved corporation and alliance names and tickers and
+// character names. kind is KindCorporation, KindAlliance or KindCharacter. It deals in plain values so that another
 // package can implement it without importing this one. Implementations must
 // be safe for concurrent use.
 //
 // Only successful lookups are Put. A corporation or alliance can be neither
-// renamed nor re-tickered by players, so an entry never goes stale.
+// renamed nor re-tickered by players, and a character is renamed only by CCP,
+// so an entry practically never goes stale.
 type NameCache interface {
 	Get(kind string, id int64) (name, ticker string, ok bool)
 	Put(kind string, id int64, name, ticker string)
@@ -217,19 +222,27 @@ func (r *Resolver) cached(id int64) (string, bool) {
 // ID, and false when it cannot be resolved. An id of zero or less returns
 // false without a request.
 func (r *Resolver) Corporation(ctx context.Context, id int64) (Entity, bool) {
-	return r.entity(ctx, KindCorporation, "corporations", id)
+	return r.entity(ctx, KindCorporation, "corporations", id, true)
 }
 
 // Alliance returns the name and ticker of the alliance with the given ID, and
 // false when it cannot be resolved. An id of zero or less returns false
 // without a request.
 func (r *Resolver) Alliance(ctx context.Context, id int64) (Entity, bool) {
-	return r.entity(ctx, KindAlliance, "alliances", id)
+	return r.entity(ctx, KindAlliance, "alliances", id, true)
 }
 
-// entity resolves one corporation or alliance through the name cache, asking
-// ESI's `GET /{collection}/{id}/` on a miss.
-func (r *Resolver) entity(ctx context.Context, kind, collection string, id int64) (Entity, bool) {
+// Character returns the name of the character with the given ID, with an
+// empty Ticker, and false when it cannot be resolved. An id of zero or less
+// returns false without a request.
+func (r *Resolver) Character(ctx context.Context, id int64) (Entity, bool) {
+	return r.entity(ctx, KindCharacter, "characters", id, false)
+}
+
+// entity resolves one character, corporation or alliance through the name
+// cache, asking ESI's `GET /{collection}/{id}/` on a miss. hasTicker says the
+// answer must carry a ticker as well as a name.
+func (r *Resolver) entity(ctx context.Context, kind, collection string, id int64, hasTicker bool) (Entity, bool) {
 	if id <= 0 {
 		return Entity{}, false
 	}
@@ -242,8 +255,14 @@ func (r *Resolver) entity(ctx context.Context, kind, collection string, id int64
 		Ticker string `json:"ticker"`
 	}
 	err := r.fetch(ctx, fmt.Sprintf("/%s/%d/", collection, id), &body)
-	if err == nil && (body.Name == "" || body.Ticker == "") {
-		err = fmt.Errorf("the ESI answer lacks the %s name or ticker", kind)
+	switch {
+	case err != nil:
+	case body.Name == "":
+		err = fmt.Errorf("the ESI answer lacks the %s name", kind)
+	case hasTicker && body.Ticker == "":
+		err = fmt.Errorf("the ESI answer lacks the %s ticker", kind)
+	case !hasTicker:
+		body.Ticker = ""
 	}
 	if err != nil {
 		r.logger.Warn("leaving the "+kind+" unresolved", kind+"_id", id, "error", err)

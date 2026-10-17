@@ -36,8 +36,8 @@ timestamp:
 - **Title:** `<victim ship> — <victim name | corp name>`, linked to the kill on zKillboard.
 - **Thumbnail:** a render of the victim's ship.
 - **Details (`block`):** one monospace code block in the description, a row per detail with the labels in
-  an aligned column: System, Value (`1.2B ISK`), Attackers, Victim and Final blow (`Pilot (Ship)`).
-  The victim's and the final blow's corporation (`[TICKER] Corp`) and alliance (`<ALLY> Alliance`)
+  an aligned column: System, Value (`1.2B ISK`), Attackers, Victim (`Pilot`) and Final blow
+  (`Pilot (Ship)`). The victim's and the final blow's corporation (`[TICKER] Corp`) and alliance (`<ALLY> Alliance`)
   each get a line of their own under the value. A row the killmail does not carry is left out, and
   a value too long for the 40-column block wraps onto an indented continuation line. Names appear
   literally; a backtick in one is shown as the look-alike `ˋ` so it cannot break the block.
@@ -57,7 +57,8 @@ The details block of a `block` kill card reads:
 System     J134349 (HOTEL)
 Value      412.5M ISK
 Attackers  7
-Victim     [CORP] Victim Corporation
+Victim     Pilot A
+           [CORP] Victim Corporation
            <VCTM> Victim Alliance
 Final blow Pilot B (Loki)
            [FRND] Friendly Corporation
@@ -69,14 +70,14 @@ falls back to the solar system ID. When the system has a temporary name on the W
 chain alias), the System row or field shows it after the name, e.g. `J134349 (HOTEL)`; a system with no
 temporary name shows the name alone.
 
-Wanderer often sends a corporation or alliance ID without its name or ticker. Those are looked up
-from ESI's public `/corporations/{id}/` and `/alliances/{id}/` endpoints before the card is posted,
-once per ID: corporation and alliance names and tickers do not change in EVE, so every one resolved
-is kept in `names.json` in the state directory and survives a restart. Only IDs the payload carries
+Wanderer often sends a corporation or alliance ID without its name or ticker, and sometimes a
+character ID without its name. Those are looked up from ESI's public `/corporations/{id}/`,
+`/alliances/{id}/` and `/characters/{id}/` endpoints before the card is posted, once per ID: these
+names and tickers practically never change in EVE, so every one resolved is kept in `names.json` in the state directory and survives a restart. Only IDs the payload carries
 are looked up, so a pilot Wanderer reports without an alliance shows none. A lookup that fails
 within a few seconds leaves that line out, and the kill is posted anyway. `names.json` is a cache
 only and is safe to delete; a corrupt one is moved aside as `names.json.corrupt` and rebuilt. Delete
-it, or the one entry, if CCP ever force-renames a corporation the cache already knows.
+it, or the one entry, if CCP ever force-renames a corporation or character the cache already knows.
 
 ## Setup
 
@@ -320,7 +321,7 @@ nix run .     # with the variables already in the environment
 - **The bot only writes.** No slash commands, no reading messages, and no map events other than
   kills, connection changes, system deletions and system metadata changes.
 - **Little enrichment.** Posts carry what Wanderer sent, plus the system name and any missing
-  corporation and alliance names from ESI. Nothing is fetched from zKillboard or ESI's killmail
+  character, corporation and alliance names from ESI. Nothing is fetched from zKillboard or ESI's killmail
   endpoints.
 
 ## Development

@@ -185,9 +185,10 @@ func rows(k killmail.Killmail, systemName string) []row {
 	if k.AttackerCount > 0 {
 		add("Attackers", strconv.Itoa(k.AttackerCount))
 	}
-	// The victim's ship and pilot are already in the title, so this row
-	// carries their affiliation.
-	add("Victim", affiliation(k.Victim))
+	// The victim's ship is already in the title, so this row reads like the
+	// final blow's without it: the pilot, then their affiliation. A structure
+	// has no pilot and shows the affiliation alone.
+	add("Victim", join("\n", k.Victim.CharName, affiliation(k.Victim)))
 	add("Final blow", finalBlow(k.FinalBlow))
 	return out
 }

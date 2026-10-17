@@ -257,7 +257,7 @@ func TestRenderTypicalKillContent(t *testing.T) {
 		{"System", []string{"J123456"}},
 		{"Value", []string{"412.5M ISK"}},
 		{"Attackers", []string{"7"}},
-		{"Victim", []string{"[CORP] Victim Corporation", "<VCTM> Victim Alliance"}},
+		{"Victim", []string{"Pilot A", "[CORP] Victim Corporation", "<VCTM> Victim Alliance"}},
 		{"Final blow", []string{"Pilot B (Loki)", "[FRND] Friendly Corporation", "<BLUE> Friendly Alliance"}},
 	}
 	got := blockRows(t, embed.Description)
@@ -296,17 +296,17 @@ func TestRenderWrapsLongValues(t *testing.T) {
 		{
 			name:     "breaks at the last space that fits",
 			corpName: "The Exceedingly Long Corporation Name of Doom",
-			want:     []string{"[CORP] The Exceedingly Long", "Corporation Name of Doom", "<VCTM> Victim Alliance"},
+			want:     []string{"Pilot A", "[CORP] The Exceedingly Long", "Corporation Name of Doom", "<VCTM> Victim Alliance"},
 		},
 		{
 			name:     "hard-breaks a word longer than the column",
 			corpName: strings.Repeat("x", 40),
-			want:     []string{"[CORP]", strings.Repeat("x", 29), strings.Repeat("x", 11), "<VCTM> Victim Alliance"},
+			want:     []string{"Pilot A", "[CORP]", strings.Repeat("x", 29), strings.Repeat("x", 11), "<VCTM> Victim Alliance"},
 		},
 		{
 			name:     "fits exactly",
 			corpName: strings.Repeat("y", 22),
-			want:     []string{"[CORP] " + strings.Repeat("y", 22), "<VCTM> Victim Alliance"},
+			want:     []string{"Pilot A", "[CORP] " + strings.Repeat("y", 22), "<VCTM> Victim Alliance"},
 		},
 	}
 	for _, tc := range tests {
@@ -445,7 +445,7 @@ func TestRenderPartialAffiliations(t *testing.T) {
 			name:            "no alliance",
 			victim:          killmail.Party{CharName: "Pilot A", CorpTicker: "CORP", CorpName: "Victim Corporation", ShipName: "Stratios"},
 			finalBlow:       killmail.Party{CharName: "Pilot B", CorpName: "Friendly Corporation", ShipName: "Loki"},
-			wantVictim:      "[CORP] Victim Corporation",
+			wantVictim:      "Pilot A\n[CORP] Victim Corporation",
 			wantFinalBlow:   "Pilot B (Loki)\nFriendly Corporation",
 			wantTitlePrefix: "Stratios — Pilot A",
 		},
@@ -453,7 +453,7 @@ func TestRenderPartialAffiliations(t *testing.T) {
 			name:            "tickers only",
 			victim:          killmail.Party{CharName: "Pilot A", CorpTicker: "CORP", AllianceTicker: "VCTM", ShipName: "Stratios"},
 			finalBlow:       killmail.Party{AllianceTicker: "BLUE"},
-			wantVictim:      "[CORP]\n<VCTM>",
+			wantVictim:      "Pilot A\n[CORP]\n<VCTM>",
 			wantFinalBlow:   "<BLUE>",
 			wantTitlePrefix: "Stratios — Pilot A",
 		},
@@ -540,7 +540,7 @@ func TestRenderNeutralisesBackticks(t *testing.T) {
 		t.Errorf("description has %d fences, want 2:\n%s", got, embed.Description)
 	}
 	rows := rowValues(t, embed.Description)
-	if got, want := rows["Victim"], "[CORP] Evil \u02cb\u02cb\u02cb Corp\n<\u02cbA\u02cb> Victim Alliance"; got != want {
+	if got, want := rows["Victim"], "Pilot A\n[CORP] Evil \u02cb\u02cb\u02cb Corp\n<\u02cbA\u02cb> Victim Alliance"; got != want {
 		t.Errorf("Victim row = %q, want %q", got, want)
 	}
 	if got, want := strings.Split(rows["Final blow"], "\n")[0], "Pilot \u02cbB\u02cb (Lo\u02cbki)"; got != want {

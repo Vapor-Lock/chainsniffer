@@ -24,7 +24,7 @@ change often, and the killmail records the alliance at kill time.
 
 **Non-Goals:**
 - Inferring an alliance the payload does not give: no corporation-to-alliance lookups or storage.
-- Character or ship-name lookups. Wanderer has sent those in every payload seen so far.
+- Ship-name lookups. Wanderer has sent those in every payload seen so far.
 - Changing classification or filters, which stay on the payload.
 - Persisting system names, which already resolve once per process.
 
@@ -100,6 +100,24 @@ remains a function of the payload alone.
 - *Alternative:* enrich during decoding in `internal/killmail`. Rejected: decoding is pure and
   offline.
 
+### Character names too, found in the live check
+
+The live check posted kill 139233228, whose payload carried the victim's `victim_char_id` but no
+`victim_char_name`, so the title fell back to the corporation and the card never named the pilot.
+Character names are resolved the same way: `universe.Character(ctx, id)` calls ESI's public
+`GET /characters/{id}/`, which returns a `name` and no ticker, and returns an `Entity` with an empty
+`Ticker`. They are cached as a third kind, `"character"`, in a `characters` table of `names.json`; a
+file written before the table existed loads with an empty one. `relay.Affiliations` gains the
+method, and enrichment fills an empty `CharName` for the victim and the final blow beside the
+corporations and alliances, so a cold kill does at most six lookups in the one round trip. Only CCP
+renames characters, which is rare enough to treat like a forced corporation rename.
+
+The same check showed that the `block` card's Victim row carried only the affiliation, leaving the
+pilot to the title. It now reads like the Final blow row: the pilot on the first line, then the
+corporation and alliance, without the ship that the title already names. A victim without a
+character, such as a structure, shows the affiliation alone. The `fields` style keeps its restored
+layout, and the `components` style already names the victim in its section.
+
 ## Risks / Trade-offs
 
 - [ESI slow or down] → a kill whose names are not cached waits at most about one timeout (3s), then
@@ -107,7 +125,7 @@ remains a function of the payload alone.
   kill retries.
 - [CCP force-renames an offensive corporation] → the stored name stays until someone deletes that
   entry, or the whole `names.json`; the README says so. This is rare enough to accept.
-- [`names.json` write per new ID] → at most four small atomic writes for a kill that introduces new
+- [`names.json` write per new ID] → at most six small atomic writes for a kill that introduces new
   IDs, and none once they are known. That is cheap next to the Discord post.
 - [ESI error budget] → steady-state traffic is close to zero once the chain's regulars are cached,
   and every request sends the existing descriptive user agent.

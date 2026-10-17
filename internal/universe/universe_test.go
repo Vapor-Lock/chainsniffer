@@ -193,9 +193,11 @@ const (
 	allyID   = int64(99000001)
 	corpBody = `{"name":"Vapor Lock Industries","ticker":"VLI","member_count":42}`
 	allyBody = `{"name":"Vapor Lock Alliance","ticker":"VLA","executor_corporation_id":98000001}`
+	charID   = int64(2112000001)
+	charBody = `{"name":"Unlucky Miner","corporation_id":98000001,"birthday":"2015-03-24T11:37:00Z"}`
 )
 
-// entityHandler answers ESI's corporation and alliance endpoints, and records
+// entityHandler answers ESI's character, corporation and alliance endpoints, and records
 // how many requests it saw.
 func entityHandler(t *testing.T, requests *atomic.Int64) http.HandlerFunc {
 	t.Helper()
@@ -213,6 +215,8 @@ func entityHandler(t *testing.T, requests *atomic.Int64) http.HandlerFunc {
 			_, _ = w.Write([]byte(corpBody))
 		case "/alliances/99000001/":
 			_, _ = w.Write([]byte(allyBody))
+		case "/characters/2112000001/":
+			_, _ = w.Write([]byte(charBody))
 		default:
 			t.Errorf("unexpected request path %q", r.URL.Path)
 			http.NotFound(w, r)
@@ -220,23 +224,31 @@ func entityHandler(t *testing.T, requests *atomic.Int64) http.HandlerFunc {
 	}
 }
 
-// lookups pairs each affiliation lookup with the ID and answer the handlers
-// above serve for it.
+// lookups pairs each entity lookup with the ID and answer the handlers above
+// serve for it. A character has a name and no ticker.
 var lookups = []struct {
-	kind string
-	id   int64
-	want universe.Entity
-	call func(*universe.Resolver, context.Context, int64) (universe.Entity, bool)
+	kind      string
+	id        int64
+	want      universe.Entity
+	hasTicker bool
+	call      func(*universe.Resolver, context.Context, int64) (universe.Entity, bool)
 }{
 	{
 		kind: universe.KindCorporation, id: corpID,
-		want: universe.Entity{Name: "Vapor Lock Industries", Ticker: "VLI"},
-		call: (*universe.Resolver).Corporation,
+		want:      universe.Entity{Name: "Vapor Lock Industries", Ticker: "VLI"},
+		hasTicker: true,
+		call:      (*universe.Resolver).Corporation,
 	},
 	{
 		kind: universe.KindAlliance, id: allyID,
-		want: universe.Entity{Name: "Vapor Lock Alliance", Ticker: "VLA"},
-		call: (*universe.Resolver).Alliance,
+		want:      universe.Entity{Name: "Vapor Lock Alliance", Ticker: "VLA"},
+		hasTicker: true,
+		call:      (*universe.Resolver).Alliance,
+	},
+	{
+		kind: universe.KindCharacter, id: charID,
+		want: universe.Entity{Name: "Unlucky Miner"},
+		call: (*universe.Resolver).Character,
 	},
 }
 
@@ -326,6 +338,7 @@ func TestEntityPrefilledCache(t *testing.T) {
 	names := newFakeNames()
 	names.Put(universe.KindCorporation, corpID, "Cached Corp", "CC")
 	names.Put(universe.KindAlliance, allyID, "Cached Alliance", "CA")
+	names.Put(universe.KindCharacter, charID, "Cached Pilot", "")
 	r := newResolver(t, srv, universe.WithNameCache(names))
 
 	if got, ok := r.Corporation(context.Background(), corpID); !ok || got != (universe.Entity{Name: "Cached Corp", Ticker: "CC"}) {
@@ -333,6 +346,9 @@ func TestEntityPrefilledCache(t *testing.T) {
 	}
 	if got, ok := r.Alliance(context.Background(), allyID); !ok || got != (universe.Entity{Name: "Cached Alliance", Ticker: "CA"}) {
 		t.Errorf("Alliance() = (%+v, %t), want the cached entry", got, ok)
+	}
+	if got, ok := r.Character(context.Background(), charID); !ok || got != (universe.Entity{Name: "Cached Pilot"}) {
+		t.Errorf("Character() = (%+v, %t), want the cached entry", got, ok)
 	}
 }
 
@@ -344,16 +360,20 @@ func TestEntityFailures(t *testing.T) {
 		status  int
 		body    string
 		timeout bool
+		ticker  bool // a failure only for a lookup that needs a ticker
 	}{
 		{name: "not found", status: http.StatusNotFound, body: `{"error":"Not found"}`},
 		{name: "server error", status: http.StatusBadGateway, body: `{"error":"Bad gateway"}`},
 		{name: "not JSON", status: http.StatusOK, body: "<html>gateway</html>"},
 		{name: "no name", status: http.StatusOK, body: `{"ticker":"VLI"}`},
-		{name: "no ticker", status: http.StatusOK, body: `{"name":"Vapor Lock Industries"}`},
+		{name: "no ticker", status: http.StatusOK, body: `{"name":"Vapor Lock Industries"}`, ticker: true},
 		{name: "timeout", timeout: true},
 	}
 	for _, lk := range lookups {
 		for _, tc := range tests {
+			if tc.ticker && !lk.hasTicker {
+				continue
+			}
 			t.Run(lk.kind+"/"+tc.name, func(t *testing.T) {
 				var requests atomic.Int64
 				released := make(chan struct{})

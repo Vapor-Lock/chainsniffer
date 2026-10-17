@@ -765,11 +765,12 @@ func TestHandleRendersTheCardStyle(t *testing.T) {
 	}
 }
 
-// fakeAffiliations answers corporations and alliances from fixed tables,
+// fakeAffiliations answers characters, corporations and alliances from fixed tables,
 // failing for an ID it does not know, and records every ID it was asked for.
 type fakeAffiliations struct {
 	corporations map[int64]universe.Entity
 	alliances    map[int64]universe.Entity
+	characters   map[int64]universe.Entity
 
 	mu    sync.Mutex
 	asked []string
@@ -781,6 +782,10 @@ func (a *fakeAffiliations) Corporation(_ context.Context, id int64) (universe.En
 
 func (a *fakeAffiliations) Alliance(_ context.Context, id int64) (universe.Entity, bool) {
 	return a.lookup("alliance", a.alliances, id)
+}
+
+func (a *fakeAffiliations) Character(_ context.Context, id int64) (universe.Entity, bool) {
+	return a.lookup("character", a.characters, id)
 }
 
 func (a *fakeAffiliations) lookup(kind string, table map[int64]universe.Entity, id int64) (universe.Entity, bool) {
@@ -807,6 +812,10 @@ func newFakeAffiliations() *fakeAffiliations {
 		alliances: map[int64]universe.Entity{
 			99014747: {Name: "Final Alliance", Ticker: "FNLA"},
 		},
+		characters: map[int64]universe.Entity{
+			2124740911: {Name: "Victim Pilot"},
+			96437707:   {Name: "Final Pilot"},
+		},
 	}
 }
 
@@ -832,6 +841,37 @@ func TestHandleFillsMissingAffiliationNames(t *testing.T) {
 	}
 	want := []string{"alliance 99014747", "corporation 98735003", "corporation 98736396"}
 	if got := affils.lookups(); !slices.Equal(got, want) {
+		t.Errorf("lookups = %v, want %v", got, want)
+	}
+}
+
+// A party with a character ID but no character name shows the resolved name,
+// as Wanderer sends for some kills; a payload name is kept and not looked up.
+func TestHandleFillsMissingCharacterNames(t *testing.T) {
+	affils := newFakeAffiliations()
+	f := newFixture(t, WithAffiliations(affils))
+
+	f.handle(t, envelope(t, "01JB", kill(1, map[string]any{
+		"victim_char_id":       2124740911,
+		"victim_char_name":     "",
+		"victim_corp_id":       98736396,
+		"victim_corp_name":     "Victim Corporation",
+		"victim_corp_ticker":   "VCTC",
+		"final_blow_char_id":   96437707,
+		"final_blow_char_name": "Payload Pilot",
+		"final_blow_ship_name": "Loki",
+	})))
+
+	desc := f.poster.embeds[0].Description
+	for _, want := range []string{"Victim Pilot", "Payload Pilot"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("embed lacks %q:\n%s", want, desc)
+		}
+	}
+	if strings.Contains(desc, "Final Pilot") {
+		t.Errorf("embed replaced the payload's final blow name:\n%s", desc)
+	}
+	if got, want := affils.lookups(), []string{"character 2124740911"}; !slices.Equal(got, want) {
 		t.Errorf("lookups = %v, want %v", got, want)
 	}
 }
@@ -899,8 +939,8 @@ func TestHandlePostsWhenAnAffiliationLookupFails(t *testing.T) {
 
 	wantPosted(t, f, 1)
 	desc := f.poster.embeds[0].Description
-	if strings.Contains(desc, "Victim     ") {
-		t.Errorf("embed has a Victim row for an unresolved corporation:\n%s", desc)
+	if !strings.Contains(desc, "Victim     Pilot 1\nFinal blow") {
+		t.Errorf("embed's Victim row has more than the pilot for an unresolved corporation:\n%s", desc)
 	}
 	if !strings.Contains(desc, "[FNLC] Final Corporation") {
 		t.Errorf("embed lacks the resolved final blow corporation:\n%s", desc)
@@ -913,8 +953,8 @@ func TestHandleLeavesAffiliationsAloneWithoutAResolver(t *testing.T) {
 
 	f.handle(t, envelope(t, "01JB", kill(1, map[string]any{"victim_corp_id": 98736396})))
 
-	if desc := f.poster.embeds[0].Description; strings.Contains(desc, "Victim     ") {
-		t.Errorf("embed has a Victim row without a resolver:\n%s", desc)
+	if desc := f.poster.embeds[0].Description; !strings.Contains(desc, "Victim     Pilot 1\n```") {
+		t.Errorf("embed's Victim row has more than the pilot without a resolver:\n%s", desc)
 	}
 }
 

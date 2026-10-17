@@ -19,7 +19,7 @@
       },
       {
         "type": 10,
-        "content": "```\nSystem     J123456\nValue      412.5M ISK\nAttackers  7\nVictim     [CORP] Victim Corporation\n           \u003cVCTM\u003e Victim Alliance\nFinal blow Pilot B (Loki)\n           [FRND] Friendly Corporation\n           \u003cBLUE\u003e Friendly Alliance\n```"
+        "content": "```\nSystem     J123456\nValue      412.5M ISK\nAttackers  7\nVictim     Pilot A\n           [CORP] Victim Corporation\n           \u003cVCTM\u003e Victim Alliance\nFinal blow Pilot B (Loki)\n           [FRND] Friendly Corporation\n           \u003cBLUE\u003e Friendly Alliance\n```"
       },
       {
         "type": 14

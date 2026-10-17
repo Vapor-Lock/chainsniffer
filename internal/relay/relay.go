@@ -108,14 +108,16 @@ type Aliases interface {
 	Alias(id int64) string
 }
 
-// Affiliations resolves corporation and alliance IDs to the names and tickers
-// an embed shows, for the parties whose payload carried the ID alone.
+// Affiliations resolves character, corporation and alliance IDs to the names
+// and tickers an embed shows, for the parties whose payload carried the ID
+// alone. A character has a name and no ticker.
 //
 // It is internal/universe's resolver, backed by the names.json cache. A lookup
 // that fails returns false, and the embed leaves that part out.
 type Affiliations interface {
 	Corporation(ctx context.Context, id int64) (universe.Entity, bool)
 	Alliance(ctx context.Context, id int64) (universe.Entity, bool)
+	Character(ctx context.Context, id int64) (universe.Entity, bool)
 }
 
 // Images fetches the portraits and logos the strip card style draws.
@@ -448,8 +450,9 @@ func orElse(s, fallback string) string {
 	return s
 }
 
-// enrich fills in the corporation and alliance names and tickers that the
-// victim and the final blow carry an ID for but no name or ticker, without an
+// enrich fills in the character names and the corporation and alliance names
+// and tickers that the victim and the final blow carry an ID for but no name or
+// ticker, without an
 // [Affiliations] doing nothing. Only empty fields are filled, and only IDs the
 // payload gives are looked up: an AllianceID of 0 means the pilot had no
 // alliance at kill time, and stays that way. The lookups run concurrently
@@ -463,8 +466,9 @@ func (r *Relay) enrich(ctx context.Context, k *killmail.Killmail) {
 	defer cancel()
 
 	var wg sync.WaitGroup
+	// A nil ticker is a character's: it has none to fill.
 	fill := func(lookup func(context.Context, int64) (universe.Entity, bool), id int64, name, ticker *string) {
-		if id <= 0 || (*name != "" && *ticker != "") {
+		if id <= 0 || (*name != "" && (ticker == nil || *ticker != "")) {
 			return
 		}
 		wg.Add(1)
@@ -477,12 +481,13 @@ func (r *Relay) enrich(ctx context.Context, k *killmail.Killmail) {
 			if *name == "" {
 				*name = e.Name
 			}
-			if *ticker == "" {
+			if ticker != nil && *ticker == "" {
 				*ticker = e.Ticker
 			}
 		}()
 	}
 	for _, p := range []*killmail.Party{&k.Victim, &k.FinalBlow} {
+		fill(r.affils.Character, p.CharID, &p.CharName, nil)
 		fill(r.affils.Corporation, p.CorpID, &p.CorpName, &p.CorpTicker)
 		fill(r.affils.Alliance, p.AllianceID, &p.AllianceName, &p.AllianceTicker)
 	}

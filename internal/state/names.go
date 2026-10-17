@@ -19,9 +19,11 @@ const (
 	// namesCorruptName is where an unparsable name cache is moved aside.
 	namesCorruptName = NamesFileName + ".corrupt"
 
-	// KindCorporation and KindAlliance are the kinds of entity Names stores.
+	// KindCorporation, KindAlliance and KindCharacter are the kinds of entity
+	// Names stores. A character has a name and no ticker.
 	KindCorporation = "corporation"
 	KindAlliance    = "alliance"
+	KindCharacter   = "character"
 )
 
 // entity is one stored name and ticker.
@@ -35,11 +37,12 @@ type entity struct {
 type namesContents struct {
 	Corporations map[string]entity `json:"corporations"`
 	Alliances    map[string]entity `json:"alliances"`
+	Characters   map[string]entity `json:"characters"`
 }
 
-// Names is a persistent cache of corporation and alliance names and tickers,
-// backed by names.json in the state directory. Corporation and alliance IDs,
-// names and tickers never change in EVE, so entries never expire. It is kept
+// Names is a persistent cache of corporation and alliance names and tickers and
+// of character names, backed by names.json in the state directory. These IDs,
+// names and tickers practically never change in EVE, so entries never expire. It is kept
 // apart from state.json so that a growing cache does not ride along on every
 // cursor save and a corrupt cache never costs the cursor.
 //
@@ -53,6 +56,7 @@ type Names struct {
 	mu           sync.Mutex
 	corporations map[int64]entity
 	alliances    map[int64]entity
+	characters   map[int64]entity
 }
 
 // OpenNames loads the name cache in dir, creating dir when missing. A missing
@@ -79,6 +83,7 @@ func OpenNames(dir string, opts ...Option) (*Names, error) {
 		logger:       o.logger,
 		corporations: make(map[int64]entity),
 		alliances:    make(map[int64]entity),
+		characters:   make(map[int64]entity),
 	}
 	if err := n.load(); err != nil {
 		return nil, err
@@ -89,8 +94,8 @@ func OpenNames(dir string, opts ...Option) (*Names, error) {
 // Path is the name cache's path.
 func (n *Names) Path() string { return n.path }
 
-// Get returns the stored name and ticker of the corporation or alliance id,
-// with kind KindCorporation or KindAlliance. ok is false when there is no entry
+// Get returns the stored name and ticker of the entity id, with kind
+// KindCorporation, KindAlliance or KindCharacter. ok is false when there is no entry
 // or kind is unknown.
 func (n *Names) Get(kind string, id int64) (name, ticker string, ok bool) {
 	n.mu.Lock()
@@ -103,7 +108,7 @@ func (n *Names) Get(kind string, id int64) (name, ticker string, ok bool) {
 	return e.Name, e.Ticker, ok
 }
 
-// Put stores the name and ticker of the corporation or alliance id and, when
+// Put stores the name and ticker of the entity id of kind and, when
 // the entry is new or different, rewrites names.json atomically. A failed write
 // is logged and the entry is kept in memory: the cache is an optimisation and
 // never fails a post. An unknown kind is logged and ignored.
@@ -137,6 +142,8 @@ func (n *Names) table(kind string) map[int64]entity {
 		return n.corporations
 	case KindAlliance:
 		return n.alliances
+	case KindCharacter:
+		return n.characters
 	default:
 		return nil
 	}
@@ -147,6 +154,7 @@ func (n *Names) save() error {
 	data, err := json.Marshal(namesContents{
 		Corporations: encodeIDs(n.corporations),
 		Alliances:    encodeIDs(n.alliances),
+		Characters:   encodeIDs(n.characters),
 	})
 	if err != nil {
 		return fmt.Errorf("state: encoding name cache: %w", err)
@@ -164,7 +172,7 @@ func (n *Names) load() error {
 		return fmt.Errorf("state: reading %s: %w", n.path, err)
 	}
 
-	corporations, alliances, err := decodeNames(data)
+	corporations, alliances, characters, err := decodeNames(data)
 	if err != nil {
 		corrupt := filepath.Join(n.dir, namesCorruptName)
 		if renameErr := os.Rename(n.path, corrupt); renameErr != nil {
@@ -175,23 +183,27 @@ func (n *Names) load() error {
 		return nil
 	}
 
-	n.corporations, n.alliances = corporations, alliances
+	n.corporations, n.alliances, n.characters = corporations, alliances, characters
 	return nil
 }
 
-// decodeNames parses the contents of names.json.
-func decodeNames(data []byte) (corporations, alliances map[int64]entity, err error) {
+// decodeNames parses the contents of names.json. A file written before
+// characters were cached has no "characters" key and decodes to an empty table.
+func decodeNames(data []byte) (corporations, alliances, characters map[int64]entity, err error) {
 	var c namesContents
 	if err := json.Unmarshal(data, &c); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if corporations, err = decodeIDs(c.Corporations); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if alliances, err = decodeIDs(c.Alliances); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return corporations, alliances, nil
+	if characters, err = decodeIDs(c.Characters); err != nil {
+		return nil, nil, nil, err
+	}
+	return corporations, alliances, characters, nil
 }
 
 func encodeIDs(m map[int64]entity) map[string]entity {
