@@ -7,9 +7,6 @@ The embed SHALL show: a title naming the victim's ship and the victim (character
 corporation name when there is no character); the system; the victim's corporation and alliance
 (ticker and name); the final-blow pilot, ship, corporation and alliance; the attacker count; the
 ISK value formatted in a short human-readable form; and the kill time as the embed timestamp.
-Everything but the title and the timestamp SHALL be shown in one monospace block in the embed's
-description, one labelled row per item in the order System, Value, Attackers, Victim, Final blow,
-with every value starting in the same column.
 
 #### Scenario: Typical kill
 - **WHEN** a Stratios flown by "Pilot A" [CORP] is killed in J123456 with final blow by "Pilot B" in a Loki, 7 attackers, 412,500,000 ISK
@@ -18,14 +15,6 @@ with every value starting in the same column.
 #### Scenario: Missing optional fields
 - **WHEN** a killmail lacks alliance or final-blow details
 - **THEN** those parts are omitted or shown as unknown, and the message is still posted
-
-#### Scenario: Aligned rows
-- **WHEN** a kill with a system, a value, an attacker count, a victim corporation and a final blow is posted
-- **THEN** the description is a single monospace block whose rows are labelled System, Value, Attackers, Victim and Final blow in that order, and every row's value begins in the same column
-
-#### Scenario: Row with nothing to show
-- **WHEN** a killmail has no ISK value and no attacker count
-- **THEN** the block has no Value or Attackers row, and no empty row or dangling label in their place
 
 ### Requirement: Chain alias
 When the kill's solar system has a chain alias at the moment the kill is posted, the embed's System
@@ -54,11 +43,25 @@ system has no alias, the System row SHALL show the system name alone.
 
 ## ADDED Requirements
 
+### Requirement: Monospace card body
+Everything in the embed but the title and the timestamp SHALL be shown in one monospace block in
+the embed's description, one labelled row per item in the order System, Value, Attackers, Victim,
+Final blow, with every value starting in the same column.
+
+#### Scenario: Aligned rows
+- **WHEN** a kill with a system, a value, an attacker count, a victim corporation and a final blow is posted
+- **THEN** the description is a single monospace block whose rows are labelled System, Value, Attackers, Victim and Final blow in that order, and every row's value begins in the same column
+
+#### Scenario: Row with nothing to show
+- **WHEN** a killmail has no ISK value and no attacker count
+- **THEN** the block has no Value or Attackers row, and no empty row or dangling label in their place
+
 ### Requirement: Uniform card width
 Every posted embed SHALL render at the same width in the Discord desktop client, whatever its
 content. No line of the monospace block SHALL exceed a fixed column width shared by all cards; a
 longer value SHALL wrap onto continuation lines that start in the value column. Every embed SHALL
-carry the same width padding, invisible to the reader, whatever its classification.
+carry width padding, invisible to the reader, that depends on whether it shows a ship image and
+never on its classification.
 
 #### Scenario: Short and long kills side by side
 - **WHEN** a kill with short names in Thera and a kill with long corporation and alliance names in a named wormhole are posted one after the other
