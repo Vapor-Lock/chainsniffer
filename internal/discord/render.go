@@ -113,25 +113,13 @@ func footer(c killmail.Classification) string {
 }
 
 // maxAliasLen caps the alias, in characters, so that one alias cannot wrap
-// into a wall of continuation lines, and keeps the description well inside
-// Discord's 4096-character limit: a description over the limit makes Discord
-// reject the whole embed, and the kill with it.
+// into a wall of continuation lines in the block.
 const maxAliasLen = 100
-
-// markdownEscaper backslash-escapes the characters Discord reads as markdown,
-// so that an alias like "A_B_" is not italicised.
-var markdownEscaper = strings.NewReplacer(
-	`\`, `\\`,
-	"*", `\*`,
-	"_", `\_`,
-	"~", `\~`,
-	"`", "\\`",
-	"|", `\|`,
-)
 
 // system is the System row's value: the system name, followed by its chain
 // alias in parentheses when it has one. An alias without a name to follow has
-// nothing to annotate and is left out with it.
+// nothing to annotate and is left out with it. The block shows the alias
+// verbatim, so it needs no markdown escaping.
 func system(name, alias string) string {
 	if name == "" || alias == "" {
 		return name
@@ -139,7 +127,7 @@ func system(name, alias string) string {
 	if r := []rune(alias); len(r) > maxAliasLen {
 		alias = string(r[:maxAliasLen])
 	}
-	return name + " (" + markdownEscaper.Replace(alias) + ")"
+	return name + " (" + alias + ")"
 }
 
 // row is one labelled item of the block. Its value may span several lines.
@@ -191,10 +179,17 @@ const (
 	fence = "```"
 )
 
+// fenceSafe swaps every backtick for U+02CB MODIFIER LETTER GRAVE ACCENT,
+// which looks alike but is not markdown, so that no name from the payload can
+// close the block's fence early. Text inside the block is otherwise shown
+// verbatim.
+var fenceSafe = strings.NewReplacer("`", "\u02cb")
+
 // block lays the rows out as one code block: each label left-aligned in the
 // label column, its value after it, and every further line of the value,
 // whether the value has several lines or one too long to fit, indented to the
-// value column. No rows make no block.
+// value column. Backticks in a value are neutralised (see fenceSafe). No rows
+// make no block.
 func block(rows []row) string {
 	if len(rows) == 0 {
 		return ""
@@ -204,7 +199,7 @@ func block(rows []row) string {
 	indent := strings.Repeat(" ", labelWidth)
 	for _, r := range rows {
 		prefix := fmt.Sprintf("%-*s", labelWidth, r.label)
-		for _, line := range strings.Split(r.value, "\n") {
+		for _, line := range strings.Split(fenceSafe.Replace(r.value), "\n") {
 			for _, part := range wrap(line, valueWidth) {
 				b.WriteString(prefix + part + "\n")
 				prefix = indent

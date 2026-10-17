@@ -424,8 +424,9 @@ func systemRow(t *testing.T, systemName, alias string) string {
 	return ""
 }
 
-// "Chain alias": the alias follows the name in parentheses, is escaped for
-// Discord markdown and capped, and an empty alias leaves the name alone.
+// "Chain alias" and "Markdown characters in an alias": the alias follows the
+// name in parentheses, literally, and capped, and an empty alias leaves the
+// name alone.
 func TestRenderChainAlias(t *testing.T) {
 	long := strings.Repeat("a", 300)
 	tests := []struct {
@@ -437,8 +438,9 @@ func TestRenderChainAlias(t *testing.T) {
 		{name: "named system", systemName: "J134349", alias: "HOTEL", want: "J134349 (HOTEL)"},
 		{name: "name not resolved", systemName: "31001234", alias: "HOTEL", want: "31001234 (HOTEL)"},
 		{name: "no alias", systemName: "J134349", alias: "", want: "J134349"},
-		{name: "markdown escaped", systemName: "J134349", alias: "A_B_", want: `J134349 (A\_B\_)`},
-		{name: "every markdown character", systemName: "J134349", alias: "\\*_~`|", want: "J134349 (\\\\\\*\\_\\~\\`\\|)"},
+		{name: "markdown shown literally", systemName: "J134349", alias: "A_B_", want: "J134349 (A_B_)"},
+		{name: "every markdown character", systemName: "J134349", alias: `\*_~|`, want: `J134349 (\*_~|)`},
+		{name: "backtick neutralised", systemName: "J134349", alias: "A`B", want: "J134349 (A\u02cbB)"},
 		// The capped alias is still too long for one line, so it wraps
 		// after the name and then breaks hard every 29 columns.
 		{name: "capped", systemName: "J134349", alias: long, want: "J134349\n(" + long[:28] + "\n" + long[:29] + "\n" + long[:29] + "\n" + long[:14] + ")"},
@@ -449,6 +451,31 @@ func TestRenderChainAlias(t *testing.T) {
 				t.Errorf("System row = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// "Backticks in a name": a backtick anywhere in the block becomes U+02CB, so
+// the block keeps exactly its two fences.
+func TestRenderNeutralisesBackticks(t *testing.T) {
+	k := typicalKill(t)
+	k.Victim.CorpName = "Evil ``` Corp"
+	k.Victim.AllianceTicker = "`A`"
+	k.FinalBlow.CharName = "Pilot `B`"
+	k.FinalBlow.ShipName = "Lo`ki"
+	embed := discord.Render(k, killmail.Kill, "J134349", "`HOTEL`")
+
+	if got := strings.Count(embed.Description, "```"); got != 2 {
+		t.Errorf("description has %d fences, want 2:\n%s", got, embed.Description)
+	}
+	rows := rowValues(t, embed.Description)
+	if got, want := rows["Victim"], "[CORP] Evil \u02cb\u02cb\u02cb Corp\n<\u02cbA\u02cb> Victim Alliance"; got != want {
+		t.Errorf("Victim row = %q, want %q", got, want)
+	}
+	if got, want := strings.Split(rows["Final blow"], "\n")[0], "Pilot \u02cbB\u02cb (Lo\u02cbki)"; got != want {
+		t.Errorf("Final blow pilot line = %q, want %q", got, want)
+	}
+	if got, want := rows["System"], "J134349 (\u02cbHOTEL\u02cb)"; got != want {
+		t.Errorf("System row = %q, want %q", got, want)
 	}
 }
 
