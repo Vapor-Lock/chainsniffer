@@ -1,5 +1,5 @@
 // Package universe resolves EVE Online IDs to names: solar systems to system
-// names, corporations and alliances to their names and tickers, and
+// names and security statuses, corporations and alliances to their names and tickers, and
 // characters to their names.
 //
 // Wanderer's kill payload names the system only by `solar_system_id`, and
@@ -79,7 +79,8 @@ type NameCache interface {
 	Put(kind string, id int64, name, ticker string)
 }
 
-// Resolver resolves solar system IDs to names, caching the ones it has seen.
+// Resolver resolves solar system IDs to names and security statuses, caching
+// the ones it has seen.
 // It is safe for concurrent use. The zero value is not usable; call
 // NewResolver.
 type Resolver struct {
@@ -88,8 +89,8 @@ type Resolver struct {
 	timeout time.Duration
 	logger  *slog.Logger
 
-	mu    sync.RWMutex
-	names map[int64]string
+	mu      sync.RWMutex
+	systems map[int64]system
 
 	entities NameCache
 }
@@ -156,10 +157,19 @@ func WithNameCache(c NameCache) Option {
 	}
 }
 
+// system is what one ESI system lookup yields. hasSecurity is false when the
+// answer named the system but carried no security_status.
+type system struct {
+	name        string
+	security    float64
+	hasSecurity bool
+}
+
 // NewResolver returns a resolver with an empty cache.
 //
 // The cache is unbounded on purpose: a chain holds dozens of systems, so the
-// working set is tiny and system names never change.
+// working set is tiny, system names never change and security statuses change
+// only with rare CCP rebalances.
 func NewResolver(opts ...Option) *Resolver {
 	o := options{
 		baseURL: DefaultBaseURL,
@@ -178,7 +188,7 @@ func NewResolver(opts ...Option) *Resolver {
 		client:  o.client,
 		timeout: o.timeout,
 		logger:  o.logger,
-		names:   make(map[int64]string),
+		systems: make(map[int64]system),
 
 		entities: o.entities,
 	}
@@ -194,28 +204,57 @@ func (r *Resolver) Name(ctx context.Context, id int64) string {
 	if id <= 0 {
 		return ""
 	}
-	if name, ok := r.cached(id); ok {
-		return name
-	}
-
-	name, err := r.lookup(ctx, id)
+	sys, err := r.system(ctx, id)
 	if err != nil {
 		r.logger.Warn("falling back to the numeric solar system ID",
 			"solar_system_id", id, "error", err)
 		return strconv.FormatInt(id, 10)
 	}
-
-	r.mu.Lock()
-	r.names[id] = name
-	r.mu.Unlock()
-	return name
+	return sys.name
 }
 
-func (r *Resolver) cached(id int64) (string, bool) {
+// Security returns the security status of the solar system with the given ID,
+// and false when it cannot be resolved. It shares Name's cache and request, so
+// whichever of the two is asked first fetches and the other is answered from
+// the cache. An id of zero or less returns false without a request.
+//
+// A failure is logged only at debug level: the caller decides what an unknown
+// security status means and warns about it itself.
+func (r *Resolver) Security(ctx context.Context, id int64) (float64, bool) {
+	if id <= 0 {
+		return 0, false
+	}
+	sys, err := r.system(ctx, id)
+	if err == nil && !sys.hasSecurity {
+		err = errors.New("the ESI answer carries no security status")
+	}
+	if err != nil {
+		r.logger.Debug("leaving the solar system's security status unresolved",
+			"solar_system_id", id, "error", err)
+		return 0, false
+	}
+	return sys.security, true
+}
+
+// system returns the cached entry for id, asking ESI on a miss and caching
+// only a successful answer.
+func (r *Resolver) system(ctx context.Context, id int64) (system, error) {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-	name, ok := r.names[id]
-	return name, ok
+	sys, ok := r.systems[id]
+	r.mu.RUnlock()
+	if ok {
+		return sys, nil
+	}
+
+	sys, err := r.lookup(ctx, id)
+	if err != nil {
+		return system{}, err
+	}
+
+	r.mu.Lock()
+	r.systems[id] = sys
+	r.mu.Unlock()
+	return sys, nil
 }
 
 // Corporation returns the name and ticker of the corporation with the given
@@ -275,17 +314,22 @@ func (r *Resolver) entity(ctx context.Context, kind, collection string, id int64
 }
 
 // lookup asks ESI for one system.
-func (r *Resolver) lookup(ctx context.Context, id int64) (string, error) {
+func (r *Resolver) lookup(ctx context.Context, id int64) (system, error) {
 	var body struct {
-		Name string `json:"name"`
+		Name     string   `json:"name"`
+		Security *float64 `json:"security_status"`
 	}
 	if err := r.fetch(ctx, fmt.Sprintf("/universe/systems/%d/", id), &body); err != nil {
-		return "", err
+		return system{}, err
 	}
 	if body.Name == "" {
-		return "", errors.New("the ESI answer carries no system name")
+		return system{}, errors.New("the ESI answer carries no system name")
 	}
-	return body.Name, nil
+	sys := system{name: body.Name}
+	if body.Security != nil {
+		sys.security, sys.hasSecurity = *body.Security, true
+	}
+	return sys, nil
 }
 
 // fetch GETs path below the base URL and decodes the JSON answer into v. The

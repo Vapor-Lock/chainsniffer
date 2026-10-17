@@ -1216,3 +1216,78 @@ func TestReplayFailures(t *testing.T) {
 		}
 	})
 }
+
+// fakeSecurities answers security statuses from a fixed table; a system not
+// in it fails to resolve.
+type fakeSecurities struct {
+	statuses map[int64]float64
+	asked    []int64
+}
+
+func (s *fakeSecurities) Security(_ context.Context, id int64) (float64, bool) {
+	s.asked = append(s.asked, id)
+	security, ok := s.statuses[id]
+	return security, ok
+}
+
+// The known-space systems of the k-space tests, one per class, and one whose
+// security status cannot be resolved.
+const (
+	highSecSystem    = 30000142
+	lowSecSystem     = 30002813
+	nullSecSystem    = 30004759
+	unresolvedSystem = 30000999
+)
+
+// The relay binds the security lookup to its Securities: kills outside the
+// configured classes are dropped with the filter's reason, kills inside them
+// are posted, and a kill whose system cannot be resolved is posted with a
+// warning naming the system.
+func TestHandleFiltersKSpaceBySecurity(t *testing.T) {
+	securities := &fakeSecurities{statuses: map[int64]float64{
+		highSecSystem: 0.9,
+		lowSecSystem:  0.3,
+		nullSecSystem: -0.2,
+	}}
+	filters := killmail.Filters{KSpace: map[killmail.SecurityClass]bool{killmail.LowSec: true, killmail.NullSec: true}}
+	f := newFixture(t, WithFilters(filters), WithSecurities(securities))
+
+	in := func(system int64) map[string]any { return map[string]any{"solar_system_id": system} }
+	f.handle(t, envelope(t, "01JB",
+		kill(1, in(highSecSystem)),
+		kill(2, in(lowSecSystem)),
+		kill(3, in(nullSecSystem)),
+		kill(4, in(unresolvedSystem)),
+		kill(5),
+	))
+
+	wantPosted(t, f, 2, 3, 4, 5)
+	if line := "killmail_id=1 filter=" + killmail.FilterKSpaceSecurity; !strings.Contains(f.logs.String(), line) {
+		t.Errorf("logs do not name the k-space filter for the high-sec kill (want %q):\n%s", line, f.logs.String())
+	}
+	if !regexp.MustCompile(`level=WARN .*killmail_id=4 solar_system_id=` + strconv.Itoa(unresolvedSystem)).
+		MatchString(f.logs.String()) {
+		t.Errorf("no warning names the unresolved system %d:\n%s", unresolvedSystem, f.logs.String())
+	}
+	// The wormhole kill is never looked up.
+	if want := []int64{highSecSystem, lowSecSystem, nullSecSystem, unresolvedSystem}; !slices.Equal(securities.asked, want) {
+		t.Errorf("security looked up for %v, want %v", securities.asked, want)
+	}
+}
+
+// With no class configured, a wormhole kill is posted, a known-space one is
+// dropped, and neither costs a lookup.
+func TestHandlePostsWormholeKillsWithoutKSpace(t *testing.T) {
+	securities := &fakeSecurities{}
+	f := newFixture(t, WithFilters(killmail.Filters{}), WithSecurities(securities))
+
+	f.handle(t, envelope(t, "01JB", kill(1), kill(2, map[string]any{"solar_system_id": lowSecSystem})))
+
+	wantPosted(t, f, 1)
+	if !strings.Contains(f.logs.String(), "killmail_id=2 filter="+killmail.FilterKSpaceSecurity) {
+		t.Errorf("the k-space drop is not logged:\n%s", f.logs.String())
+	}
+	if len(securities.asked) != 0 {
+		t.Errorf("security looked up for %v, want no lookup", securities.asked)
+	}
+}

@@ -6,6 +6,7 @@ import "time"
 // killmail it drops, so the relay can log which filter made the decision.
 const (
 	FilterUnlinkedSystem = "unlinked_system"
+	FilterKSpaceSecurity = "kspace_security"
 	FilterNPC            = "npc"
 	FilterMinValue       = "min_value"
 	FilterFriendlyOnly   = "friendly_only"
@@ -13,9 +14,9 @@ const (
 )
 
 // Filters is the chain deciding which killmails are worth posting. The zero
-// value posts every killmail; the relay builds one from the configuration,
-// whose defaults differ (NPC kills are excluded and kills older than an hour
-// are dropped).
+// value posts every killmail outside known space and drops the rest; the
+// relay builds one from the configuration, whose defaults also exclude NPC
+// kills and drop kills older than an hour.
 type Filters struct {
 	// Linked drops killmails whose solar system it reports as not linked to
 	// the home system. Nil disables the filter. A killmail whose system is
@@ -23,6 +24,18 @@ type Filters struct {
 	// relay wires in the topology graph, which answers as of the moment the
 	// killmail is processed, not as of the kill.
 	Linked func(systemID int64) bool
+
+	// KSpace is the set of security classes whose known-space killmails are
+	// posted; a known-space killmail in any other class is dropped, so an
+	// empty set drops them all. Killmails in wormhole space, or whose system
+	// is unknown, pass whatever it holds.
+	KSpace map[SecurityClass]bool
+
+	// Security returns the security status of a known-space system, or false
+	// when it cannot be resolved, in which case the killmail passes. It is
+	// asked only when KSpace holds some but not all of the classes. Nil
+	// counts as never resolving.
+	Security func(systemID int64) (float64, bool)
 
 	// ExcludeNPC drops killmails the payload flags as NPC kills.
 	ExcludeNPC bool
@@ -51,6 +64,9 @@ func (f Filters) Allow(k Killmail, c Classification) (bool, string) {
 	if f.Linked != nil && (k.SolarSystemID == 0 || !f.Linked(k.SolarSystemID)) {
 		return false, FilterUnlinkedSystem
 	}
+	if !f.allowKSpace(k.SolarSystemID) {
+		return false, FilterKSpaceSecurity
+	}
 	if f.ExcludeNPC && k.NPC {
 		return false, FilterNPC
 	}
@@ -64,6 +80,33 @@ func (f Filters) Allow(k Killmail, c Classification) (bool, string) {
 		return false, FilterMaxKillAge
 	}
 	return true, ""
+}
+
+// allowKSpace applies the k-space security filter to a killmail in systemID.
+func (f Filters) allowKSpace(systemID int64) bool {
+	if !IsKSpace(systemID) {
+		return true
+	}
+	configured := 0
+	for _, c := range SecurityClasses {
+		if f.KSpace[c] {
+			configured++
+		}
+	}
+	switch configured {
+	case 0:
+		return false
+	case len(SecurityClasses):
+		return true
+	}
+	if f.Security == nil {
+		return true
+	}
+	security, ok := f.Security(systemID)
+	if !ok {
+		return true
+	}
+	return f.KSpace[ClassOf(security)]
 }
 
 func (f Filters) now() time.Time {

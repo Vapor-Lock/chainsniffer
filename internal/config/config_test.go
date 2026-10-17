@@ -70,6 +70,8 @@ func TestLoadMinimal(t *testing.T) {
 		ExcludeNPC:       true,
 		MinValue:         0,
 		MaxKillAge:       time.Hour,
+		// No k-space classes: no kill in known space is relayed.
+		KSpace: nil,
 		// No home system: the topology is neither loaded nor followed, but
 		// the resync interval still carries its default.
 		HomeSystemID:           0,
@@ -273,6 +275,53 @@ func TestLoad(t *testing.T) {
 				}
 				if cfg.LogFormat != config.LogFormatJSON {
 					t.Errorf("LogFormat = %q, want json", cfg.LogFormat)
+				}
+			},
+		},
+		{
+			name: "k-space classes are trimmed, case insensitive and ordered",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvKSpace] = "Nullsec, lowsec"
+			},
+			check: func(t *testing.T, cfg *config.Config) {
+				want := []config.SecurityClass{config.SecurityLow, config.SecurityNull}
+				if !slices.Equal(cfg.KSpace, want) {
+					t.Errorf("KSpace = %v, want %v", cfg.KSpace, want)
+				}
+			},
+		},
+		{
+			name: "k-space duplicates collapse",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvKSpace] = "HIGHSEC,highsec"
+			},
+			check: func(t *testing.T, cfg *config.Config) {
+				want := []config.SecurityClass{config.SecurityHigh}
+				if !slices.Equal(cfg.KSpace, want) {
+					t.Errorf("KSpace = %v, want %v", cfg.KSpace, want)
+				}
+			},
+		},
+		{
+			name: "k-space none",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvKSpace] = " None "
+			},
+			check: func(t *testing.T, cfg *config.Config) {
+				if len(cfg.KSpace) != 0 {
+					t.Errorf("KSpace = %v, want none", cfg.KSpace)
+				}
+			},
+		},
+		{
+			name: "k-space every class",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvKSpace] = "highsec,lowsec,nullsec"
+			},
+			check: func(t *testing.T, cfg *config.Config) {
+				want := []config.SecurityClass{config.SecurityHigh, config.SecurityLow, config.SecurityNull}
+				if !slices.Equal(cfg.KSpace, want) {
+					t.Errorf("KSpace = %v, want %v", cfg.KSpace, want)
 				}
 			},
 		},
@@ -620,6 +669,22 @@ func TestLoadErrors(t *testing.T) {
 			problems: 1,
 		},
 		{
+			name: "unknown k-space class",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvKSpace] = "lowsec,wormhole"
+			},
+			want:     []string{config.EnvKSpace, "wormhole", "highsec", "lowsec", "nullsec", "none"},
+			problems: 1,
+		},
+		{
+			name: "k-space none with a class",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvKSpace] = "none,highsec"
+			},
+			want:     []string{config.EnvKSpace, "none,highsec"},
+			problems: 1,
+		},
+		{
 			name: "friendly-only without friendly IDs",
 			setup: func(_ *testing.T, env map[string]string) {
 				env[config.EnvFriendlyOnly] = "true"
@@ -786,6 +851,33 @@ func TestConfigLogValueIncludesCardStyle(t *testing.T) {
 			env := baseEnv()
 			if value != "" {
 				env[config.EnvCardStyle] = value
+			}
+			cfg, err := config.Load(lookup(env))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+
+			var buf bytes.Buffer
+			slog.New(slog.NewTextHandler(&buf, nil)).Info("starting", "config", cfg)
+
+			if line := buf.String(); !strings.Contains(line, want) {
+				t.Errorf("log line %q does not contain %q", line, want)
+			}
+		})
+	}
+}
+
+func TestConfigLogValueIncludesKSpace(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{"": "kspace=none", "none": "kspace=none", "nullsec, HIGHSEC": "kspace=highsec,nullsec"}
+	for value, want := range tests {
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+
+			env := baseEnv()
+			if value != "" {
+				env[config.EnvKSpace] = value
 			}
 			cfg, err := config.Load(lookup(env))
 			if err != nil {

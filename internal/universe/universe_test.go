@@ -188,6 +188,117 @@ func TestNameHonoursContextCancellation(t *testing.T) {
 	}
 }
 
+// Security and Name share one cached lookup: whichever is asked first
+// fetches, and the other is answered without a request.
+func TestSecurityAndNameShareOneRequest(t *testing.T) {
+	tests := []struct {
+		name          string
+		securityFirst bool
+	}{
+		{name: "Security then Name", securityFirst: true},
+		{name: "Name then Security"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int64
+			srv := httptest.NewServer(systemHandler(t, &requests))
+			defer srv.Close()
+
+			r := newResolver(t, srv)
+			ctx := context.Background()
+			if !tc.securityFirst {
+				if got := r.Name(ctx, theraID); got != theraName {
+					t.Errorf("Name() = %q, want %q", got, theraName)
+				}
+			}
+			// Thera's -0.99 also checks that a negative status decodes.
+			if got, ok := r.Security(ctx, theraID); !ok || got != -0.99 {
+				t.Errorf("Security() = (%v, %t), want (-0.99, true)", got, ok)
+			}
+			if tc.securityFirst {
+				if got := r.Name(ctx, theraID); got != theraName {
+					t.Errorf("Name() = %q, want %q", got, theraName)
+				}
+			}
+			if got := requests.Load(); got != 1 {
+				t.Errorf("ESI requests = %d, want 1", got)
+			}
+		})
+	}
+}
+
+// A failed security lookup returns false and is not cached, so the next call
+// tries again; an answer without security_status is a failure too.
+func TestSecurityFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "not found", status: http.StatusNotFound, body: `{"error":"Not found"}`},
+		{name: "not JSON", status: http.StatusOK, body: "<html>gateway</html>"},
+		{name: "no name", status: http.StatusOK, body: `{"security_status":0.9}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int64
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			r := newResolver(t, srv)
+			for i := range 2 {
+				if got, ok := r.Security(context.Background(), theraID); ok || got != 0 {
+					t.Fatalf("call %d: Security() = (%v, %t), want (0, false)", i+1, got, ok)
+				}
+			}
+			if got := requests.Load(); got != 2 {
+				t.Errorf("ESI requests = %d, want 2 (a failed lookup must not be cached)", got)
+			}
+		})
+	}
+}
+
+// An answer that names the system but carries no security_status resolves the
+// name and leaves the security status unknown, without asking again for it.
+func TestSecurityMissingFromAnswer(t *testing.T) {
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(`{"system_id":31000005,"name":"Thera"}`))
+	}))
+	defer srv.Close()
+
+	r := newResolver(t, srv)
+	if got, ok := r.Security(context.Background(), theraID); ok {
+		t.Errorf("Security() = (%v, true), want false", got)
+	}
+	if got := r.Name(context.Background(), theraID); got != theraName {
+		t.Errorf("Name() = %q, want %q", got, theraName)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Errorf("ESI requests = %d, want 1", got)
+	}
+}
+
+// An ID of zero or less is not looked up.
+func TestSecurityWithoutSystemID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the resolver made a request for a non-positive system ID")
+	}))
+	defer srv.Close()
+
+	r := newResolver(t, srv)
+	for _, id := range []int64{0, -1} {
+		if got, ok := r.Security(context.Background(), id); ok || got != 0 {
+			t.Errorf("Security(%d) = (%v, %t), want (0, false)", id, got, ok)
+		}
+	}
+}
+
 const (
 	corpID   = int64(98000001)
 	allyID   = int64(99000001)

@@ -78,6 +78,16 @@ type Resolver interface {
 	Name(ctx context.Context, id int64) string
 }
 
+// Securities resolves a known-space solar system ID to its security status,
+// for the k-space security filter.
+//
+// It is internal/universe's resolver, which caches the status beside the
+// system's name from one ESI request. A lookup that fails returns false, and
+// the filter passes the kill.
+type Securities interface {
+	Security(ctx context.Context, id int64) (float64, bool)
+}
+
 // Store is the relay's durable progress: which killmails have already been
 // posted, and which event to resume the stream from.
 //
@@ -168,6 +178,7 @@ type Relay struct {
 	affils   Affiliations
 	images   Images
 	lastKill LastKill
+	security Securities
 
 	friendlies killmail.Friendlies
 	filters    killmail.Filters
@@ -184,6 +195,7 @@ type options struct {
 	affils     Affiliations
 	images     Images
 	lastKill   LastKill
+	security   Securities
 	friendlies killmail.Friendlies
 	filters    killmail.Filters
 	logger     *slog.Logger
@@ -242,6 +254,14 @@ func WithLastKill(l LastKill) Option {
 	return func(o *options) { o.lastKill = l }
 }
 
+// WithSecurities sets where the security status of a known-space kill's
+// system is looked up, for a k-space filter configured with some but not all
+// of the classes. Without one, or with a nil one, the status is never
+// resolved and such a kill passes the filter.
+func WithSecurities(s Securities) Option {
+	return func(o *options) { o.security = s }
+}
+
 // WithLogger sets the logger the pipeline reports on. A nil logger keeps
 // slog.Default.
 func WithLogger(l *slog.Logger) Option {
@@ -289,6 +309,7 @@ func New(poster Poster, resolver Resolver, store Store, opts ...Option) (*Relay,
 		affils:     o.affils,
 		images:     o.images,
 		lastKill:   o.lastKill,
+		security:   o.security,
 		friendlies: o.friendlies,
 		filters:    o.filters,
 		logger:     o.logger,
@@ -351,7 +372,7 @@ func (r *Relay) handle(ctx context.Context, k killmail.Killmail, payload json.Ra
 	}
 
 	class := r.friendlies.Classify(k)
-	if allowed, filter := r.filters.Allow(k, class); !allowed {
+	if allowed, filter := r.filtersFor(ctx, k).Allow(k, class); !allowed {
 		r.dropped(k.ID, filter)
 		return nil
 	}
@@ -388,6 +409,25 @@ func (r *Relay) handle(ctx context.Context, k killmail.Killmail, payload json.Ra
 	}
 	r.logger.Info("posted killmail", attrs...)
 	return nil
+}
+
+// filtersFor returns the filters to judge k with: the configured ones, with
+// their security lookup bound to ctx when the relay has a [Securities], which
+// warns of a system whose status could not be resolved.
+func (r *Relay) filtersFor(ctx context.Context, k killmail.Killmail) killmail.Filters {
+	f := r.filters
+	if r.security == nil {
+		return f
+	}
+	f.Security = func(systemID int64) (float64, bool) {
+		security, ok := r.security.Security(ctx, systemID)
+		if !ok {
+			r.logger.Warn("passing a known-space killmail whose security status could not be resolved",
+				"killmail_id", k.ID, "solar_system_id", systemID)
+		}
+		return security, ok
+	}
+	return f
 }
 
 // Replay posts killmail id from payload, a saved kill's (see [LastKill]),

@@ -252,6 +252,63 @@ func TestRelayFiltersToTheHomeChain(t *testing.T) {
 	}
 }
 
+// TestRelayFiltersKSpace covers relay-runtime's "Filter defaults" for known
+// space end to end: unset, CHAINSNIFFER_KSPACE drops a kill in a known-space
+// system, and all three classes post it.
+func TestRelayFiltersKSpace(t *testing.T) {
+	const (
+		kspaceSystemID = 30000142
+		kspaceKillID   = 128412500
+		kspaceEventID  = "01JBQ8H0000000000000000021"
+	)
+
+	for _, tc := range []struct {
+		name   string
+		kspace string // "" leaves CHAINSNIFFER_KSPACE unset
+		posted bool
+	}{
+		{name: "default", posted: false},
+		{name: "every class", kspace: "highsec,lowsec,nullsec", posted: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			esi := newFakeESI(t)
+			discordFake, discordURL := newFakeDiscord(t)
+			_, wandererURL := newFakeWanderer(t,
+				killFrameIn(kspaceEventID, kspaceSystemID, killmailJSONIn(kspaceKillID, kspaceSystemID, false)))
+
+			vars := testEnv(dir, wandererURL)
+			if tc.kspace != "" {
+				vars[config.EnvKSpace] = tc.kspace
+			}
+			logs, stop := startRelay(t, vars, withDiscordBaseURL(discordURL), withESIBaseURL(esi), withImageBaseURL(noImages(t)))
+			waitFor(t, "the event to be recorded", func() bool {
+				return readState(t, dir).LastEventID == kspaceEventID
+			})
+			if code := stop(); code != exitOK {
+				t.Errorf("run() = %d, want %d; logs:\n%s", code, exitOK, logs)
+			}
+
+			posts := discordFake.posted()
+			if !tc.posted {
+				if len(posts) != 0 {
+					t.Fatalf("Discord received %d posts, want none: known space is off by default; logs:\n%s", len(posts), logs)
+				}
+				assertLogged(t, logs.String(), map[string]any{
+					"msg": "dropping killmail", "killmail_id": float64(kspaceKillID), "filter": killmail.FilterKSpaceSecurity,
+				})
+				return
+			}
+			if len(posts) != 1 {
+				t.Fatalf("Discord received %d posts, want 1; logs:\n%s", len(posts), logs)
+			}
+			if want := fmt.Sprintf("https://zkillboard.com/kill/%d/", kspaceKillID); posts[0].URL != want {
+				t.Errorf("posted card URL = %q, want %q", posts[0].URL, want)
+			}
+		})
+	}
+}
+
 // TestRelayShowsTheChainAlias covers chain-aliases end to end, with and
 // without a home system: the alias the snapshot names is rendered in the
 // System row, a system_metadata_changed rename shows on the next kill, and

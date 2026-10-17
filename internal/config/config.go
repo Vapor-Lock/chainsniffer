@@ -34,6 +34,7 @@ const (
 	EnvExcludeNPC          = "CHAINSNIFFER_EXCLUDE_NPC"
 	EnvMinValue            = "CHAINSNIFFER_MIN_VALUE"
 	EnvMaxKillAge          = "CHAINSNIFFER_MAX_KILL_AGE"
+	EnvKSpace              = "CHAINSNIFFER_KSPACE"
 
 	EnvHomeSystemID           = "CHAINSNIFFER_HOME_SYSTEM_ID"
 	EnvTopologyResyncInterval = "CHAINSNIFFER_TOPOLOGY_RESYNC_INTERVAL"
@@ -91,6 +92,24 @@ const (
 	CardStyleComponents CardStyle = "components"
 )
 
+// SecurityClass is a known-space security class. It mirrors
+// killmail.SecurityClass, which cmd/chainsniffer converts it to, so that
+// config does not depend on the filters.
+type SecurityClass string
+
+// The known-space security classes, in the order the summary lists them.
+const (
+	SecurityHigh SecurityClass = "highsec"
+	SecurityLow  SecurityClass = "lowsec"
+	SecurityNull SecurityClass = "nullsec"
+)
+
+// securityClasses is every class in its fixed order.
+var securityClasses = []SecurityClass{SecurityHigh, SecurityLow, SecurityNull}
+
+// kspaceNone is the word for the empty set of classes.
+const kspaceNone = "none"
+
 // Config is the relay's effective configuration. It is read once at startup
 // and never mutated afterwards.
 type Config struct {
@@ -113,6 +132,10 @@ type Config struct {
 	ExcludeNPC          bool
 	MinValue            float64 // ISK; a killmail below this is dropped
 	MaxKillAge          time.Duration
+	// KSpace holds the security classes whose known-space kills are relayed,
+	// each at most once and in the order high, low, null. Empty relays no
+	// kill in known space; wormhole kills are never affected.
+	KSpace []SecurityClass
 
 	// Home chain. HomeSystemID is the EVE solar system ID kills are judged
 	// against: a kill in a system with no path to it over the map's
@@ -167,6 +190,7 @@ func Load(lookup LookupFunc) (*Config, error) {
 		ExcludeNPC:          l.boolean(EnvExcludeNPC, DefaultExcludeNPC),
 		MinValue:            l.isk(EnvMinValue),
 		MaxKillAge:          l.duration(EnvMaxKillAge, DefaultMaxKillAge),
+		KSpace:              l.kspace(EnvKSpace),
 
 		HomeSystemID:           l.systemID(EnvHomeSystemID),
 		TopologyResyncInterval: l.duration(EnvTopologyResyncInterval, DefaultTopologyResyncInterval),
@@ -210,6 +234,7 @@ func (c *Config) LogValue() slog.Value {
 		slog.Bool("exclude_npc", c.ExcludeNPC),
 		slog.Float64("min_value", c.MinValue),
 		slog.Duration("max_kill_age", c.MaxKillAge),
+		slog.String("kspace", kspaceString(c.KSpace)),
 	}
 	if c.HomeSystemID != 0 {
 		attrs = append(attrs, slog.Int64("home_system_id", c.HomeSystemID))
@@ -516,4 +541,57 @@ func (l *loader) cardStyle(name string) CardStyle {
 	l.errorf("%s: %q is not a card style (%s, %s, %s or %s)", name, v,
 		CardStyleBlock, CardStyleFields, CardStyleStrip, CardStyleComponents)
 	return DefaultCardStyle
+}
+
+// kspace parses the security classes whose known-space kills are relayed: a
+// comma-separated list of high, low and null, in any case and order, with
+// repeats and empty entries ignored. Unset, empty and "none" all give the empty set. "none"
+// beside a class is an error rather than a guess at which one was meant.
+func (l *loader) kspace(name string) []SecurityClass {
+	raw, ok := l.value(name)
+	if !ok {
+		return nil
+	}
+	want := make(map[SecurityClass]bool)
+	none, bad := false, false
+	for _, field := range strings.Split(raw, ",") {
+		switch c := SecurityClass(strings.ToLower(strings.TrimSpace(field))); c {
+		case SecurityHigh, SecurityLow, SecurityNull:
+			want[c] = true
+		case kspaceNone:
+			none = true
+		case "":
+			// An empty entry, as in "highsec,,lowsec", is ignored like idList's.
+		default:
+			l.errorf("%s: %q is not a security class (%s, %s, %s or %s)", name, strings.TrimSpace(field),
+				SecurityHigh, SecurityLow, SecurityNull, kspaceNone)
+			bad = true
+		}
+	}
+	if none && len(want) > 0 {
+		l.errorf("%s: %q combines %s with a security class", name, raw, kspaceNone)
+		return nil
+	}
+	if bad {
+		return nil
+	}
+	var classes []SecurityClass
+	for _, c := range securityClasses {
+		if want[c] {
+			classes = append(classes, c)
+		}
+	}
+	return classes
+}
+
+// kspaceString renders classes for the summary, or "none" for the empty set.
+func kspaceString(classes []SecurityClass) string {
+	if len(classes) == 0 {
+		return kspaceNone
+	}
+	names := make([]string, len(classes))
+	for i, c := range classes {
+		names[i] = string(c)
+	}
+	return strings.Join(names, ",")
 }

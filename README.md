@@ -147,10 +147,25 @@ connecting anywhere.
 | `CHAINSNIFFER_EXCLUDE_NPC` | `true` | Drop kills Wanderer flagged as NPC kills. |
 | `CHAINSNIFFER_MIN_VALUE` | `0` | Drop kills below this total value, in ISK. |
 | `CHAINSNIFFER_MAX_KILL_AGE` | `1h` | Drop kills older than this Go duration, e.g. `90m` or `1h30m`. Keeps a backfill or a resent killmail from posting stale kills. |
+| `CHAINSNIFFER_KSPACE` | `none` | Comma-separated known-space security classes whose kills are posted: any of `highsec`, `lowsec` and `nullsec`, or `none`. Case-insensitive. Kills in wormhole space are never affected. |
 
 With no friendly IDs configured every kill is neutral, which is a fine way to run the bot as a
 plain in-chain kill feed. Turning `CHAINSNIFFER_FRIENDLY_ONLY` on without friendly IDs would post
 nothing at all, so that combination is rejected at startup.
+
+`CHAINSNIFFER_KSPACE` decides which kills in known space (solar system IDs 30000000–30999999) are
+posted, by the system's security status: `highsec` is 0.45 and up (0.5 and up as the game shows it),
+`lowsec` is above 0.0 and below 0.45, and `nullsec` is 0.0 and below, which includes Pochven and
+Zarzakh. Unset, empty or `none` posts no known-space kill; `highsec,lowsec,nullsec` posts all of
+them. Any other word, or `none` together with a class, is rejected at startup. Wormhole kills,
+Thera's included, always pass this filter. With only some classes set the relay looks the system's
+security status up in ESI, from the same request that names the system; if that lookup fails the
+kill is posted anyway and a warning names the system. A dropped kill logs `filter=kspace_security`
+at debug level.
+
+> **Upgrading:** `CHAINSNIFFER_KSPACE` defaults to `none`, so an upgraded relay no longer posts
+> kills in known space. Set `CHAINSNIFFER_KSPACE=highsec,lowsec,nullsec` to keep the earlier
+> behaviour.
 
 ### Home chain
 
