@@ -442,13 +442,24 @@ func TestClientReplacesASilentConnection(t *testing.T) {
 		case <-time.After(5 * time.Second):
 		}
 	})
-	ctx, cancel := context.WithCancel(context.Background())
+	// The deadline only bounds a broken client; the run normally ends on cancel.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// Stop on what the test asserts rather than after a fixed number of
+	// reconnects: on a loaded host the 50ms watchdog can fire before a request
+	// reaches the server, and such an attempt neither counts as a request nor
+	// logs the silent stream.
 	logs := &logBuffer{}
-	stop := &sleeper{stopAfter: 2, cancel: cancel}
+	stop := func(ctx context.Context, _ time.Duration) error {
+		if recorder.count() >= 2 && strings.Contains(logs.String(), "delivered nothing for 50ms") {
+			cancel()
+			return context.Canceled
+		}
+		return ctx.Err()
+	}
 	client := newClient(t, server.URL,
-		wanderer.WithSleep(stop.sleep),
+		wanderer.WithSleep(stop),
 		wanderer.WithStaleTimeout(50*time.Millisecond),
 		wanderer.WithLogger(logs.logger(slog.LevelInfo)),
 	)
