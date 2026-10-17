@@ -175,6 +175,56 @@ chainsniffer: invalid configuration: CHAINSNIFFER_WANDERER_URL is required; ...
 `SIGTERM` (so, `docker stop`) finishes the post in flight, within ten seconds, saves the state and
 exits 0.
 
+### Docker Compose
+
+To run it next to other services, merge these keys into the existing `docker-compose.yml`, at the
+top level next to `services:`. The tokens arrive as Compose secrets and are read through the
+`_FILE` variables, so they stay out of `docker inspect` and the compose file itself:
+
+```yaml
+services:
+  chainsniffer:
+    image: chainsniffer:0.1.0
+    pull_policy: never          # loaded with `docker load`, not pulled from a registry
+    restart: unless-stopped
+    stop_grace_period: 15s      # room for the ten-second shutdown described above
+    environment:
+      CHAINSNIFFER_WANDERER_URL: https://wanderer.example.com
+      CHAINSNIFFER_WANDERER_MAP: my-chain
+      CHAINSNIFFER_WANDERER_TOKEN_FILE: /run/secrets/chainsniffer_wanderer_token
+      CHAINSNIFFER_DISCORD_TOKEN_FILE: /run/secrets/chainsniffer_discord_token
+      CHAINSNIFFER_DISCORD_CHANNEL_ID: "123456789012345678"
+      CHAINSNIFFER_FRIENDLY_ALLIANCE_IDS: "99000001"
+      CHAINSNIFFER_HOME_SYSTEM_ID: "31000727"
+      CHAINSNIFFER_LOG_FORMAT: json
+    secrets:
+      - chainsniffer_wanderer_token
+      - chainsniffer_discord_token
+    volumes:
+      - chainsniffer-state:/var/lib/chainsniffer
+
+volumes:
+  chainsniffer-state:
+
+secrets:
+  chainsniffer_wanderer_token:
+    file: ./secrets/wanderer.key
+  chainsniffer_discord_token:
+    file: ./secrets/discord.token
+```
+
+- **Secrets:** Compose mounts each secret file with its permissions on the host. The container
+  runs as uid `65532`, so the files must be readable by that uid; mode `0644`, or ownership by
+  `65532`, works.
+- **State volume:** Compose creates the named volume on the first `docker compose up`, owned by the
+  image's user. Never point two services, or two compose projects, at the same map: each would
+  post every kill, so the channel would get each kill twice.
+- **Numbers:** quote IDs in `environment:`, as above, so YAML does not read them as numbers.
+- **Health check:** the image has no shell, so there is nothing for a `healthcheck:` to run. Rely
+  on `restart:` and the exit statuses below.
+- **Commands:** `docker compose up -d chainsniffer` starts it, and `docker compose logs -f
+  chainsniffer` follows its log.
+
 ### The binary
 
 ```sh

@@ -21,7 +21,7 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
 
-        chainsniffer = pkgs.buildGoModule {
+        chainsniffer = pkgs.buildGoModule (finalAttrs: {
           pname = "chainsniffer";
           version = "0.1.0";
           src = ./.;
@@ -43,6 +43,7 @@
           ldflags = [
             "-s"
             "-w"
+            "-X main.version=${finalAttrs.version}"
           ];
 
           # buildGoModule would otherwise only test the subPackages above.
@@ -56,7 +57,7 @@
             description = "Discord bot relaying in-chain Wanderer killmails";
             mainProgram = "chainsniffer";
           };
-        };
+        });
 
         # A check that reuses the package's vendored dependencies and toolchain
         # but runs `command` instead of building the binary, so it stays offline.
