@@ -3,7 +3,11 @@ package discord
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -54,7 +58,23 @@ type fakeDiscord struct {
 	mu       sync.Mutex
 	attempts int
 	posts    []*discordgo.MessageEmbed
+	bodies   []sentMessage
 	requests []string
+}
+
+// sentMessage is one message post as the fake received it, accepted or not.
+type sentMessage struct {
+	ContentType string
+	Flags       int                       `json:"flags"`
+	Embeds      []*discordgo.MessageEmbed `json:"embeds"`
+	Components  json.RawMessage           `json:"components"`
+	Files       []sentFile
+}
+
+// sentFile is one file part of a multipart message post.
+type sentFile struct {
+	Field, Name, ContentType string
+	Data                     []byte
 }
 
 // newFakeDiscord returns a fake that accepts everything, serving on a test
@@ -120,17 +140,16 @@ func (f *fakeDiscord) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePost answers one message post with the next scripted status, recording
-// the embed it carried.
+// the body it carried and, when it is accepted, its embeds.
 func (f *fakeDiscord) handlePost(w http.ResponseWriter, r *http.Request) {
-	var sent struct {
-		Embeds []*discordgo.MessageEmbed `json:"embeds"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+	sent, err := readMessage(r)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "undecodable body: "+err.Error())
 		return
 	}
 
 	f.mu.Lock()
+	f.bodies = append(f.bodies, sent)
 	attempt := f.attempts
 	f.attempts++
 	status := 0
@@ -166,6 +185,50 @@ func (f *fakeDiscord) handlePost(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, status, http.StatusText(status))
 	}
+}
+
+// readMessage decodes a message post, a JSON body or a multipart upload whose
+// payload_json part is the JSON body.
+func readMessage(r *http.Request) (sentMessage, error) {
+	sent := sentMessage{ContentType: r.Header.Get("Content-Type")}
+	mediaType, params, err := mime.ParseMediaType(sent.ContentType)
+	if err != nil {
+		return sent, err
+	}
+	if mediaType != "multipart/form-data" {
+		return sent, json.NewDecoder(r.Body).Decode(&sent)
+	}
+
+	parts := multipart.NewReader(r.Body, params["boundary"])
+	for {
+		part, err := parts.NextPart()
+		if errors.Is(err, io.EOF) {
+			return sent, nil
+		}
+		if err != nil {
+			return sent, err
+		}
+		data, err := io.ReadAll(part)
+		if err != nil {
+			return sent, err
+		}
+		if part.FormName() == "payload_json" {
+			if err := json.Unmarshal(data, &sent); err != nil {
+				return sent, err
+			}
+			continue
+		}
+		sent.Files = append(sent.Files, sentFile{
+			Field: part.FormName(), Name: part.FileName(), ContentType: part.Header.Get("Content-Type"), Data: data,
+		})
+	}
+}
+
+// received returns every message post the fake served, accepted or not.
+func (f *fakeDiscord) received() []sentMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]sentMessage(nil), f.bodies...)
 }
 
 // posted returns the embeds the fake accepted, in order.
@@ -252,6 +315,9 @@ func newPoster(t *testing.T, baseURL string, opts ...Option) (*Poster, *testHook
 	p.closeGateway = func() error { hooks.closes++; return nil }
 	return p, hooks
 }
+
+// testMessage is the message the posting tests send.
+func testMessage() Message { return Message{Embed: testEmbed()} }
 
 // testEmbed is the embed the posting tests send.
 func testEmbed() *discordgo.MessageEmbed {

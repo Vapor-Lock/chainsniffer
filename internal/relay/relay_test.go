@@ -37,14 +37,14 @@ type fakePoster struct {
 	calls int
 }
 
-func (p *fakePoster) Post(_ context.Context, embed *discordgo.MessageEmbed) error {
+func (p *fakePoster) Post(_ context.Context, msg discord.Message) error {
 	p.calls++
 	if p.fail != nil {
 		if err := p.fail(p.calls); err != nil {
 			return err
 		}
 	}
-	p.embeds = append(p.embeds, embed)
+	p.embeds = append(p.embeds, msg.Embed)
 	return nil
 }
 

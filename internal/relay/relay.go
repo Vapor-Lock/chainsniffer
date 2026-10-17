@@ -35,7 +35,6 @@ import (
 	"github.com/Vapor-Lock/chainsniffer/internal/discord"
 	"github.com/Vapor-Lock/chainsniffer/internal/killmail"
 	"github.com/Vapor-Lock/chainsniffer/internal/wanderer"
-	"github.com/bwmarrin/discordgo"
 )
 
 // FilterDuplicate is the reason logged for a killmail that is dropped because
@@ -61,7 +60,7 @@ const (
 // that one killmail, which costs the killmail alone, or hit something an
 // operator has to fix — see [IsFatalPost].
 type Poster interface {
-	Post(ctx context.Context, embed *discordgo.MessageEmbed) error
+	Post(ctx context.Context, msg discord.Message) error
 }
 
 // Resolver resolves a solar system ID to the name an embed shows.
@@ -272,7 +271,7 @@ func (r *Relay) handle(ctx context.Context, k killmail.Killmail) error {
 
 	name := r.resolver.Name(ctx, k.SolarSystemID)
 	alias := r.alias(k.SolarSystemID)
-	if err := r.poster.Post(ctx, discord.Render(k, class, name, alias, r.style)); err != nil {
+	if err := r.poster.Post(ctx, discord.Message{Embed: discord.Render(k, class, name, alias, r.style)}); err != nil {
 		switch {
 		case ctx.Err() != nil:
 			// A post torn down by shutdown is not a post Discord refused, and
