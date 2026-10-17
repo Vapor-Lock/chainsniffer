@@ -23,7 +23,7 @@
 
         chainsniffer = pkgs.buildGoModule (finalAttrs: {
           pname = "chainsniffer";
-          version = "0.1.0";
+          version = "0.2.0";
           src = ./.;
 
           # Pinned hash of the vendored Go dependencies. It has to be updated
