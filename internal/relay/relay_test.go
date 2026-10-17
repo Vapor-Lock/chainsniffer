@@ -6,16 +6,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/Vapor-Lock/chainsniffer/internal/cardimage"
 	"github.com/Vapor-Lock/chainsniffer/internal/discord"
 	"github.com/Vapor-Lock/chainsniffer/internal/killmail"
+	"github.com/Vapor-Lock/chainsniffer/internal/universe"
 	"github.com/Vapor-Lock/chainsniffer/internal/wanderer"
 	"github.com/bwmarrin/discordgo"
 )
@@ -27,9 +33,10 @@ const (
 	systemName = "J123456"
 )
 
-// fakePoster records the embeds it accepted, in order.
+// fakePoster records the messages it accepted, and their embeds, in order.
 type fakePoster struct {
-	embeds []*discordgo.MessageEmbed
+	messages []discord.Message
+	embeds   []*discordgo.MessageEmbed
 
 	// fail is consulted for every call, numbered from one. A non-nil error it
 	// returns is what Post returns, and the embed is not recorded.
@@ -37,32 +44,43 @@ type fakePoster struct {
 	calls int
 }
 
-func (p *fakePoster) Post(_ context.Context, embed *discordgo.MessageEmbed) error {
+func (p *fakePoster) Post(_ context.Context, msg discord.Message) error {
 	p.calls++
 	if p.fail != nil {
 		if err := p.fail(p.calls); err != nil {
 			return err
 		}
 	}
-	p.embeds = append(p.embeds, embed)
+	p.messages = append(p.messages, msg)
+	p.embeds = append(p.embeds, msg.Embed)
 	return nil
 }
 
-// ids reads the killmail IDs back out of the embeds the poster accepted, so a
-// test can assert on what was posted without reaching into the embed layout.
+// ids reads the killmail IDs back out of the cards the poster accepted, from
+// the zKillboard link an embed carries as its URL and a components card in its
+// header, so a test can assert on what was posted without reaching further
+// into the card layout.
 func (p *fakePoster) ids(t *testing.T) []int64 {
 	t.Helper()
-	ids := make([]int64, 0, len(p.embeds))
-	for _, embed := range p.embeds {
-		path := strings.Trim(strings.TrimPrefix(embed.URL, "https://zkillboard.com/kill/"), "/")
+	ids := make([]int64, 0, len(p.messages))
+	for _, msg := range p.messages {
+		var link string
+		if msg.Embed != nil {
+			link = msg.Embed.URL
+		} else if m := zkillLink.FindString(fmt.Sprint(msg.Components)); m != "" {
+			link = m
+		}
+		path := strings.Trim(strings.TrimPrefix(link, "https://zkillboard.com/kill/"), "/")
 		id, err := strconv.ParseInt(path, 10, 64)
 		if err != nil {
-			t.Fatalf("embed URL %q does not name a killmail ID: %v", embed.URL, err)
+			t.Fatalf("card link %q does not name a killmail ID: %v", link, err)
 		}
 		ids = append(ids, id)
 	}
 	return ids
 }
+
+var zkillLink = regexp.MustCompile(`https://zkillboard\.com/kill/[0-9]+/`)
 
 // fakeResolver answers from a fixed table, falling back the way
 // internal/universe does.
@@ -725,4 +743,476 @@ func TestHandleRendersTheNameAloneWithoutAnAlias(t *testing.T) {
 			}
 		})
 	}
+}
+
+// "Card style configuration": the relay posts every card in the style it is
+// given, and in the block style without one.
+func TestHandleRendersTheCardStyle(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		opts       []Option
+		wantFields bool
+	}{
+		{"default", nil, false},
+		{"block", []Option{WithCardStyle(discord.CardStyleBlock)}, false},
+		{"fields", []Option{WithCardStyle(discord.CardStyleFields)}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, tc.opts...)
+
+			f.handle(t, envelope(t, "01JB", kill(1)))
+
+			embed := f.poster.embeds[0]
+			if tc.wantFields {
+				if embed.Description != "" || len(embed.Fields) == 0 {
+					t.Errorf("fields card: description %q, %d fields; want no description and fields", embed.Description, len(embed.Fields))
+				}
+				return
+			}
+			if embed.Description == "" || len(embed.Fields) != 0 {
+				t.Errorf("block card: description %q, %d fields; want a description and no fields", embed.Description, len(embed.Fields))
+			}
+		})
+	}
+}
+
+// fakeAffiliations answers characters, corporations and alliances from fixed tables,
+// failing for an ID it does not know, and records every ID it was asked for.
+type fakeAffiliations struct {
+	corporations map[int64]universe.Entity
+	alliances    map[int64]universe.Entity
+	characters   map[int64]universe.Entity
+
+	mu    sync.Mutex
+	asked []string
+}
+
+func (a *fakeAffiliations) Corporation(_ context.Context, id int64) (universe.Entity, bool) {
+	return a.lookup("corporation", a.corporations, id)
+}
+
+func (a *fakeAffiliations) Alliance(_ context.Context, id int64) (universe.Entity, bool) {
+	return a.lookup("alliance", a.alliances, id)
+}
+
+func (a *fakeAffiliations) Character(_ context.Context, id int64) (universe.Entity, bool) {
+	return a.lookup("character", a.characters, id)
+}
+
+func (a *fakeAffiliations) lookup(kind string, table map[int64]universe.Entity, id int64) (universe.Entity, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.asked = append(a.asked, fmt.Sprintf("%s %d", kind, id))
+	e, ok := table[id]
+	return e, ok
+}
+
+// lookups returns the IDs asked for, sorted, since they are asked concurrently.
+func (a *fakeAffiliations) lookups() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Sorted(slices.Values(a.asked))
+}
+
+func newFakeAffiliations() *fakeAffiliations {
+	return &fakeAffiliations{
+		corporations: map[int64]universe.Entity{
+			98735003: {Name: "Final Corporation", Ticker: "FNLC"},
+			98736396: {Name: "Victim Corporation", Ticker: "VCTC"},
+		},
+		alliances: map[int64]universe.Entity{
+			99014747: {Name: "Final Alliance", Ticker: "FNLA"},
+		},
+		characters: map[int64]universe.Entity{
+			2124740911: {Name: "Victim Pilot"},
+			96437707:   {Name: "Final Pilot"},
+		},
+	}
+}
+
+// "Names missing from the payload": a party with corporation and alliance IDs
+// but no names or tickers shows the resolved ones.
+func TestHandleFillsMissingAffiliationNames(t *testing.T) {
+	affils := newFakeAffiliations()
+	f := newFixture(t, WithAffiliations(affils))
+
+	f.handle(t, envelope(t, "01JB", kill(1, map[string]any{
+		"victim_corp_id":         98736396,
+		"final_blow_char_name":   "Pilot B",
+		"final_blow_ship_name":   "Loki",
+		"final_blow_corp_id":     98735003,
+		"final_blow_alliance_id": 99014747,
+	})))
+
+	desc := f.poster.embeds[0].Description
+	for _, want := range []string{"[VCTC] Victim Corporation", "[FNLC] Final Corporation", "<FNLA> Final Alliance"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("embed lacks %q:\n%s", want, desc)
+		}
+	}
+	want := []string{"alliance 99014747", "corporation 98735003", "corporation 98736396"}
+	if got := affils.lookups(); !slices.Equal(got, want) {
+		t.Errorf("lookups = %v, want %v", got, want)
+	}
+}
+
+// A party with a character ID but no character name shows the resolved name,
+// as Wanderer sends for some kills; a payload name is kept and not looked up.
+func TestHandleFillsMissingCharacterNames(t *testing.T) {
+	affils := newFakeAffiliations()
+	f := newFixture(t, WithAffiliations(affils))
+
+	f.handle(t, envelope(t, "01JB", kill(1, map[string]any{
+		"victim_char_id":       2124740911,
+		"victim_char_name":     "",
+		"victim_corp_id":       98736396,
+		"victim_corp_name":     "Victim Corporation",
+		"victim_corp_ticker":   "VCTC",
+		"final_blow_char_id":   96437707,
+		"final_blow_char_name": "Payload Pilot",
+		"final_blow_ship_name": "Loki",
+	})))
+
+	desc := f.poster.embeds[0].Description
+	for _, want := range []string{"Victim Pilot", "Payload Pilot"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("embed lacks %q:\n%s", want, desc)
+		}
+	}
+	if strings.Contains(desc, "Final Pilot") {
+		t.Errorf("embed replaced the payload's final blow name:\n%s", desc)
+	}
+	if got, want := affils.lookups(), []string{"character 2124740911"}; !slices.Equal(got, want) {
+		t.Errorf("lookups = %v, want %v", got, want)
+	}
+}
+
+// "No alliance in the payload": without an alliance ID none is looked up or
+// shown, even though the corporation is known.
+func TestHandleInfersNoAllianceWithoutAnAllianceID(t *testing.T) {
+	affils := newFakeAffiliations()
+	f := newFixture(t, WithAffiliations(affils))
+
+	f.handle(t, envelope(t, "01JB", kill(1, map[string]any{"victim_corp_id": 98736396})))
+
+	if desc := f.poster.embeds[0].Description; strings.Contains(desc, "<") {
+		t.Errorf("embed shows an alliance for a victim without one:\n%s", desc)
+	}
+	if got, want := affils.lookups(), []string{"corporation 98736396"}; !slices.Equal(got, want) {
+		t.Errorf("lookups = %v, want %v", got, want)
+	}
+}
+
+// "Payload already carries the names": the payload's names are shown and
+// nothing is looked up; a party missing only its ticker has the ticker filled
+// and keeps the payload's name.
+func TestHandleKeepsPayloadAffiliationNames(t *testing.T) {
+	affils := newFakeAffiliations()
+	f := newFixture(t, WithAffiliations(affils))
+
+	f.handle(t, envelope(t, "01JB", kill(1, map[string]any{
+		"victim_corp_id":          98736396,
+		"victim_corp_name":        "Payload Corporation",
+		"victim_corp_ticker":      "PAYC",
+		"victim_alliance_id":      99014747,
+		"victim_alliance_name":    "Payload Alliance",
+		"victim_alliance_ticker":  "PAYA",
+		"final_blow_char_name":    "Pilot B",
+		"final_blow_corp_id":      98735003,
+		"final_blow_corp_name":    "Renamed Corporation",
+		"final_blow_alliance_id":  0,
+		"final_blow_ship_name":    "Loki",
+		"final_blow_ship_type_id": 29990,
+	})))
+
+	desc := f.poster.embeds[0].Description
+	for _, want := range []string{"[PAYC] Payload Corporation", "<PAYA> Payload Alliance", "[FNLC] Renamed Corporation"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("embed lacks %q:\n%s", want, desc)
+		}
+	}
+	if got, want := affils.lookups(), []string{"corporation 98735003"}; !slices.Equal(got, want) {
+		t.Errorf("lookups = %v, want %v", got, want)
+	}
+}
+
+// "Lookup unavailable": a corporation that cannot be resolved is left out,
+// the rest is filled, and the kill is still posted.
+func TestHandlePostsWhenAnAffiliationLookupFails(t *testing.T) {
+	f := newFixture(t, WithAffiliations(newFakeAffiliations()))
+
+	f.handle(t, envelope(t, "01JB", kill(1, map[string]any{
+		"victim_corp_id":         98000001,
+		"final_blow_char_name":   "Pilot B",
+		"final_blow_corp_id":     98735003,
+		"final_blow_alliance_id": 99014747,
+	})))
+
+	wantPosted(t, f, 1)
+	desc := f.poster.embeds[0].Description
+	if !strings.Contains(desc, "Victim     Pilot 1\nFinal blow") {
+		t.Errorf("embed's Victim row has more than the pilot for an unresolved corporation:\n%s", desc)
+	}
+	if !strings.Contains(desc, "[FNLC] Final Corporation") {
+		t.Errorf("embed lacks the resolved final blow corporation:\n%s", desc)
+	}
+}
+
+// Without Affiliations the payload is rendered as it came.
+func TestHandleLeavesAffiliationsAloneWithoutAResolver(t *testing.T) {
+	f := newFixture(t)
+
+	f.handle(t, envelope(t, "01JB", kill(1, map[string]any{"victim_corp_id": 98736396})))
+
+	if desc := f.poster.embeds[0].Description; !strings.Contains(desc, "Victim     Pilot 1\n```") {
+		t.Errorf("embed's Victim row has more than the pilot without a resolver:\n%s", desc)
+	}
+}
+
+// fakeImages serves a blank image for every URL except the ones in fail, and
+// records every URL it was asked to fetch. URLs are "kind/id/size", or "" for
+// an ID of zero or less, as internal/eveimage's are.
+type fakeImages struct {
+	mu      sync.Mutex
+	fail    map[string]bool
+	fetched []string
+}
+
+func (i *fakeImages) url(kind string, id int64, size int) string {
+	if id <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s/%d/%d", kind, id, size)
+}
+
+func (i *fakeImages) CharacterPortrait(id int64, size int) string {
+	return i.url("character", id, size)
+}
+func (i *fakeImages) CorporationLogo(id int64, size int) string {
+	return i.url("corporation", id, size)
+}
+func (i *fakeImages) AllianceLogo(id int64, size int) string { return i.url("alliance", id, size) }
+
+func (i *fakeImages) Fetch(_ context.Context, url string) (image.Image, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.fetched = append(i.fetched, url)
+	if url == "" || i.fail[url] {
+		return nil, false
+	}
+	return image.NewRGBA(image.Rect(0, 0, 8, 8)), true
+}
+
+// partyIDs gives the victim and the final blow a character and a
+// corporation, and the victim an alliance.
+var partyIDs = map[string]any{
+	"victim_char_id":         90000001,
+	"victim_corp_id":         98000001,
+	"victim_alliance_id":     99000001,
+	"final_blow_char_id":     90000002,
+	"final_blow_corp_id":     98000002,
+	"final_blow_char_name":   "Killer",
+	"final_blow_ship_name":   "Sabre",
+	"final_blow_alliance_id": 0,
+}
+
+// wantStrip checks that msg is the strip card: a components card whose
+// gallery shows a PNG attached as kill.png.
+func wantStrip(t *testing.T, msg discord.Message) {
+	t.Helper()
+	if msg.Embed != nil || len(msg.Components) != 1 {
+		t.Fatalf("strip card = embed %+v, %d components; want one container", msg.Embed, len(msg.Components))
+	}
+	gallery := false
+	for _, c := range msg.Components[0].Components {
+		if c.Type == discord.ComponentMediaGallery && len(c.Items) == 1 && c.Items[0].Media.URL == "attachment://kill.png" {
+			gallery = true
+		}
+	}
+	if !gallery {
+		t.Errorf("strip card has no gallery showing attachment://kill.png: %+v", msg.Components[0])
+	}
+	if len(msg.Files) != 1 || msg.Files[0].Name != "kill.png" {
+		t.Fatalf("strip card files = %+v, want kill.png alone", msg.Files)
+	}
+	if _, err := png.Decode(bytes.NewReader(msg.Files[0].Data)); err != nil {
+		t.Errorf("kill.png does not decode as a PNG: %v", err)
+	}
+}
+
+func TestHandlePostsTheStripWithItsImages(t *testing.T) {
+	images := &fakeImages{}
+	f := newFixture(t, WithCardStyle(discord.CardStyleStrip), WithImages(images))
+
+	f.handle(t, envelope(t, "01JB", kill(1, partyIDs)))
+
+	wantPosted(t, f, 1)
+	wantStrip(t, f.poster.messages[0])
+	slices.Sort(images.fetched)
+	want := []string{
+		"alliance/99000001/64",
+		"character/90000001/128", "character/90000002/128",
+		"corporation/98000001/64", "corporation/98000002/64",
+	}
+	if !slices.Equal(images.fetched, want) {
+		t.Errorf("fetched %q, want %q (only the IDs the payload gives)", images.fetched, want)
+	}
+}
+
+func TestHandlePostsTheStripWhenImagesFail(t *testing.T) {
+	images := &fakeImages{fail: map[string]bool{
+		"character/90000001/128": true, "corporation/98000002/64": true,
+	}}
+	f := newFixture(t, WithCardStyle(discord.CardStyleStrip), WithImages(images))
+
+	f.handle(t, envelope(t, "01JB", kill(1, partyIDs)))
+
+	wantPosted(t, f, 1)
+	wantStrip(t, f.poster.messages[0])
+}
+
+func TestHandlePostsTheStripWithoutImages(t *testing.T) {
+	f := newFixture(t, WithCardStyle(discord.CardStyleStrip))
+
+	f.handle(t, envelope(t, "01JB", kill(1, partyIDs)))
+
+	wantPosted(t, f, 1)
+	wantStrip(t, f.poster.messages[0])
+}
+
+func TestHandlePostsTheCardWithoutAStripWhenTheStripFails(t *testing.T) {
+	f := newFixture(t, WithCardStyle(discord.CardStyleStrip), WithImages(&fakeImages{}))
+	f.relay.drawStrip = func(cardimage.StripInput) ([]byte, error) { return nil, errors.New("no fonts") }
+
+	f.handle(t, envelope(t, "01JB", kill(1, partyIDs)))
+
+	wantPosted(t, f, 1)
+	msg := f.poster.messages[0]
+	if msg.Embed != nil || len(msg.Components) != 1 || len(msg.Files) != 0 {
+		t.Errorf("fallback card = embed %+v, %d components, %d files; want the components card with no files",
+			msg.Embed, len(msg.Components), len(msg.Files))
+	}
+	if !strings.Contains(f.logs.String(), "level=WARN") || !strings.Contains(f.logs.String(), "no fonts") {
+		t.Errorf("logs do not warn about the strip:\n%s", f.logs)
+	}
+}
+
+func TestHandleAppliesTheStripTextFallbacks(t *testing.T) {
+	var got cardimage.StripInput
+	f := newFixture(t, WithCardStyle(discord.CardStyleStrip))
+	f.relay.drawStrip = func(in cardimage.StripInput) ([]byte, error) {
+		got = in
+		return cardimage.Strip(in)
+	}
+
+	f.handle(t, envelope(t, "01JB", kill(1, map[string]any{
+		"victim_char_name": "", "victim_ship_name": "", "final_blow_ship_name": "Guristas Eradicator",
+	})))
+
+	want := cardimage.StripInput{
+		Victim:   cardimage.Party{Name: "Unknown pilot", Hull: "Unknown ship"},
+		Attacker: cardimage.Party{Name: "Guristas Eradicator", Hull: "Guristas Eradicator"},
+	}
+	if got != want {
+		t.Errorf("strip input = %+v, want %+v", got, want)
+	}
+}
+
+func TestHandlePostsComponents(t *testing.T) {
+	f := newFixture(t, WithCardStyle(discord.CardStyleComponents), WithImages(&fakeImages{}))
+
+	f.handle(t, envelope(t, "01JB", kill(1, partyIDs)))
+
+	if len(f.poster.messages) != 1 {
+		t.Fatalf("posted %d messages, want 1", len(f.poster.messages))
+	}
+	msg := f.poster.messages[0]
+	if msg.Embed != nil || len(msg.Files) != 0 || len(msg.Components) == 0 {
+		t.Errorf("components card = embed %+v, %d files, %d components; want components alone",
+			msg.Embed, len(msg.Files), len(msg.Components))
+	}
+	if !f.store.Posted(1) {
+		t.Error("the components card was not recorded as posted")
+	}
+}
+
+// fakeLastKill records every kill saved to it.
+type fakeLastKill struct {
+	ids      []int64
+	payloads []json.RawMessage
+}
+
+func (l *fakeLastKill) Save(id int64, payload json.RawMessage) {
+	l.ids = append(l.ids, id)
+	l.payloads = append(l.payloads, payload)
+}
+
+// Every posted kill is saved with the payload it arrived in; a filtered kill,
+// a duplicate and a kill Discord refused are not.
+func TestHandleSavesThePostedKill(t *testing.T) {
+	last := &fakeLastKill{}
+	f := newFixture(t, WithLastKill(last), WithFilters(killmail.Filters{ExcludeNPC: true}))
+	f.store.MarkPosted(3)
+	f.poster.fail = func(call int) error {
+		if call == 2 {
+			return &discord.GaveUpError{Attempts: 7, Err: errors.New("502 Bad Gateway")}
+		}
+		return nil
+	}
+
+	env := envelope(t, "01JB", kill(1), kill(2), kill(3), kill(4, map[string]any{"npc": true}), kill(5))
+	f.handle(t, env)
+
+	if want := []int64{1, 5}; !slices.Equal(last.ids, want) {
+		t.Errorf("saved kills = %v, want %v", last.ids, want)
+	}
+	for i, p := range last.payloads {
+		if string(p) != string(env.Payload) {
+			t.Errorf("saved payload %d = %s, want the event's %s", i, p, env.Payload)
+		}
+	}
+}
+
+// A replay posts the saved kill past the dedupe and the filters, and leaves
+// the store and the last kill as they were.
+func TestReplayPostsTheSavedKill(t *testing.T) {
+	last := &fakeLastKill{}
+	f := newFixture(t, WithLastKill(last), WithFilters(killmail.Filters{ExcludeNPC: true}))
+	f.store.MarkPosted(2)
+	payload := envelope(t, "01JB", kill(1), kill(2, map[string]any{"npc": true})).Payload
+
+	if err := f.relay.Replay(context.Background(), 2, payload); err != nil {
+		t.Fatalf("Replay() = %v", err)
+	}
+
+	wantPosted(t, f, 2)
+	if f.store.lastEventID != "" || len(f.store.saves) != 0 || len(f.store.posted) != 1 {
+		t.Errorf("store = cursor %q, %d saves, posted %v; want it untouched", f.store.lastEventID, len(f.store.saves), f.store.posted)
+	}
+	if len(last.ids) != 0 {
+		t.Errorf("saved kills = %v, want none for a replay", last.ids)
+	}
+	if !strings.Contains(f.logs.String(), `msg="replayed killmail" killmail_id=2`) {
+		t.Errorf("logs do not report the replay:\n%s", f.logs)
+	}
+}
+
+func TestReplayFailures(t *testing.T) {
+	payload := envelope(t, "01JB", kill(1)).Payload
+
+	t.Run("killmail not in the payload", func(t *testing.T) {
+		f := newFixture(t)
+		if err := f.relay.Replay(context.Background(), 9, payload); err == nil {
+			t.Error("Replay() = nil, want an error naming the missing killmail")
+		}
+		wantPosted(t, f)
+	})
+	t.Run("post refused", func(t *testing.T) {
+		f := newFixture(t)
+		refused := errors.New("403 Missing Permissions")
+		f.poster.fail = func(int) error { return refused }
+		if err := f.relay.Replay(context.Background(), 1, payload); !errors.Is(err, refused) {
+			t.Errorf("Replay() = %v, want the post's error", err)
+		}
+	})
 }

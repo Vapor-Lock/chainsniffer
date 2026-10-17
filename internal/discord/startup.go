@@ -86,28 +86,50 @@ func (p *Poster) checkPermissions(ctx context.Context, selfID string, channel *d
 			"channel_id", p.channelID, "error", err)
 		return nil
 	}
-	if missing := missingPermissions(perms); len(missing) > 0 {
+	if missing := missingPermissions(perms, p.attachFiles); len(missing) > 0 {
 		return &FatalError{
 			Op:     "channel check",
 			Status: http.StatusForbidden,
-			Hint:   hintFor(http.StatusForbidden),
+			Hint:   p.hintFor(http.StatusForbidden),
 			Err:    fmt.Errorf("missing %s on channel %s", strings.Join(missing, ", "), p.channelID),
 		}
 	}
 	return nil
 }
 
-// missingPermissions names the required permissions that perms lacks.
-func missingPermissions(perms int64) []string {
-	var missing []string
-	for _, required := range []struct {
-		bit  int64
-		name string
-	}{
+// permission is one channel permission the bot needs.
+type permission struct {
+	bit  int64
+	name string
+}
+
+// requiredPermissions are the permissions the bot needs on the channel, with
+// Attach Files when its cards upload files.
+func requiredPermissions(attachFiles bool) []permission {
+	required := []permission{
 		{discordgo.PermissionViewChannel, "View Channel"},
 		{discordgo.PermissionSendMessages, "Send Messages"},
 		{discordgo.PermissionEmbedLinks, "Embed Links"},
-	} {
+	}
+	if attachFiles {
+		required = append(required, permission{discordgo.PermissionAttachFiles, "Attach Files"})
+	}
+	return required
+}
+
+// requiredPermissionNames names requiredPermissions, in order.
+func requiredPermissionNames(attachFiles bool) []string {
+	var names []string
+	for _, required := range requiredPermissions(attachFiles) {
+		names = append(names, required.name)
+	}
+	return names
+}
+
+// missingPermissions names the required permissions that perms lacks.
+func missingPermissions(perms int64, attachFiles bool) []string {
+	var missing []string
+	for _, required := range requiredPermissions(attachFiles) {
 		if perms&required.bit == 0 {
 			missing = append(missing, required.name)
 		}
@@ -119,7 +141,7 @@ func missingPermissions(perms int64) []string {
 // rejection names something an operator has to change.
 func (p *Poster) startupError(op string, err error) error {
 	if class, status := classify(err); class == classFatal {
-		return &FatalError{Op: op, Status: status, Hint: hintFor(status), Err: err}
+		return &FatalError{Op: op, Status: status, Hint: p.hintFor(status), Err: err}
 	}
 	return fmt.Errorf("discord: %s: %w", op, err)
 }

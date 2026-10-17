@@ -13,30 +13,53 @@ One process serves one map and one channel.
 
 ## What a post looks like
 
-Each killmail becomes an embed:
+Each killmail becomes a card, in one of four styles chosen by `CHAINSNIFFER_CARD_STYLE`:
+
+- **`components`**, the default, is a native Discord components card: the title beside the ship
+  render, the `block` style's monospace block, then a section each for the victim and the final
+  blow with their name, hull and tickers beside their alliance logo (else corporation logo, else
+  portrait), and the kill time in the reader's own time zone. Discord fetches its images itself.
+- **`strip`** is the `components` card with a picture in place of its two party sections: a dark
+  strip showing the victim on the left and the final blow on the right, each with their portrait,
+  their corporation and alliance logos at the outer edge, and their name above their hull.
+  chainsniffer draws the strip itself from the [EVE image server](https://images.evetech.net) and uploads it with the
+  card, so this style needs the **Attach Files** permission. An image that cannot be fetched within
+  a few seconds is left as a blank tile, and a strip that cannot be drawn at all is logged and the
+  card goes out without it.
+- **`block`** sets the details in an aligned monospace block and gives every card the same width.
+- **`fields`** shows them as Discord inline fields instead, the layout chainsniffer used before the
+  block; its cards are as wide as their content.
+
+The two embed styles, `block` and `fields`, share the title, thumbnail, color, footer and
+timestamp; the `strip` and `components` cards share the same title, ship render, colour and
+`block` details, with a footer line of their own:
 
 - **Title:** `<victim ship> — <victim name | corp name>`, linked to the kill on zKillboard.
 - **Thumbnail:** a render of the victim's ship.
-- **Details:** one monospace code block in the description, a row per detail with the labels in
-  an aligned column: System, Value (`1.2B ISK`), Attackers, Victim and Final blow (`Pilot (Ship)`).
-  The victim's and the final blow's corporation (`[TICKER] Corp`) and alliance (`<ALLY> Alliance`)
+- **Details (`block`):** one monospace code block in the description, a row per detail with the labels in
+  an aligned column: System, Value (`1.2B ISK`), Attackers, Victim (`Pilot`) and Final blow
+  (`Pilot (Ship)`). The victim's and the final blow's corporation (`[TICKER] Corp`) and alliance (`<ALLY> Alliance`)
   each get a line of their own under the value. A row the killmail does not carry is left out, and
   a value too long for the 40-column block wraps onto an indented continuation line. Names appear
   literally; a backtick in one is shown as the look-alike `ˋ` so it cannot break the block.
-- **Width:** an invisible line of U+2800 (braille blank) characters under the block makes every
+- **Details (`fields`):** inline fields System, Value, Attackers, Victim
+  (`[TICKER] Corp / <ALLY> Alliance`) and Final blow (`Pilot (Ship)` over that affiliation), each
+  left out when the killmail does not carry it. Markdown characters in a chain alias are escaped.
+- **Width (`block`):** an invisible line of U+2800 (braille blank) characters under the block makes every
   card nearly as wide as Discord allows on desktop (37 blanks beside a ship thumbnail, 46
   without), so cards stack at one width whatever their content.
 - **Color and footer:** red `Loss` for a friendly victim, green `Kill` for a friendly final blow,
   and grey with no footer for a neutral in-chain kill.
 - **Timestamp:** the kill time Wanderer reported.
 
-The details block of a kill card reads:
+The details block of a `block` kill card reads:
 
 ```
 System     J134349 (HOTEL)
 Value      412.5M ISK
 Attackers  7
-Victim     [CORP] Victim Corporation
+Victim     Pilot A
+           [CORP] Victim Corporation
            <VCTM> Victim Alliance
 Final blow Pilot B (Loki)
            [FRND] Friendly Corporation
@@ -45,8 +68,17 @@ Final blow Pilot B (Loki)
 
 System names are resolved through the public ESI endpoint and cached in memory; a lookup that fails
 falls back to the solar system ID. When the system has a temporary name on the Wanderer map (its
-chain alias), the System row shows it after the name, e.g. `J134349 (HOTEL)`; a system with no
+chain alias), the System row or field shows it after the name, e.g. `J134349 (HOTEL)`; a system with no
 temporary name shows the name alone.
+
+Wanderer often sends a corporation or alliance ID without its name or ticker, and sometimes a
+character ID without its name. Those are looked up from ESI's public `/corporations/{id}/`,
+`/alliances/{id}/` and `/characters/{id}/` endpoints before the card is posted, once per ID: these
+names and tickers practically never change in EVE, so every one resolved is kept in `names.json` in the state directory and survives a restart. Only IDs the payload carries
+are looked up, so a pilot Wanderer reports without an alliance shows none. A lookup that fails
+within a few seconds leaves that line out, and the kill is posted anyway. `names.json` is a cache
+only and is safe to delete; a corrupt one is moved aside as `names.json.corrupt` and rebuilt. Delete
+it, or the one entry, if CCP ever force-renames a corporation or character the cache already knows.
 
 ## Setup
 
@@ -54,15 +86,19 @@ temporary name shows the name alone.
 
 1. Create an application at the [Discord Developer Portal](https://discord.com/developers/applications),
    add a bot to it, and copy the **bot token**. This is `CHAINSNIFFER_DISCORD_TOKEN`.
-2. Invite the bot to your server and give it these three permissions on the target channel:
-   **View Channel**, **Send Messages** and **Embed Links**. Nothing else is needed — the bot only
-   writes, and it requests no gateway intents.
+2. Invite the bot to your server and give it these permissions on the target channel:
+   **View Channel**, **Send Messages** and **Embed Links**, plus **Attach Files** for the `strip`
+   card style. Nothing else is needed — the bot only writes, and it requests no gateway intents.
 3. Turn on Developer Mode in Discord (*Settings → Advanced*), right-click the channel and
    **Copy Channel ID**. This is `CHAINSNIFFER_DISCORD_CHANNEL_ID`.
 
 chainsniffer checks all of this at startup: it verifies the token, resolves the channel, and
-reports any of the three permissions it is missing, before it subscribes to the stream. A rejected
+reports any of those permissions it is missing, before it subscribes to the stream. A rejected
 token or an unreachable channel exits 1 rather than retrying forever.
+
+> **Upgrading:** `components` became the default card style. Set `CHAINSNIFFER_CARD_STYLE=block`
+> to keep the earlier cards. The `strip` style also needs Attach Files, which the startup check
+> names when it is missing.
 
 ### 2. The Wanderer map
 
@@ -142,9 +178,11 @@ stream connects exits 1, home system or not, as it does for the stream.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `CHAINSNIFFER_STATE_DIR` | `/var/lib/chainsniffer` | Directory holding `state.json`. Must be writable. |
+| `CHAINSNIFFER_STATE_DIR` | `/var/lib/chainsniffer` | Directory holding `state.json`, the `names.json` name cache and `last_kill.json`, the last posted kill. Must be writable. |
 | `CHAINSNIFFER_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 | `CHAINSNIFFER_LOG_FORMAT` | `text` | `text` or `json`. |
+| `CHAINSNIFFER_REPLAY_CHANNEL_ID` | unset | Replay mode: post the last kill saved in the state directory to this channel, then exit. See [Testing a build](#testing-a-build). |
+| `CHAINSNIFFER_CARD_STYLE` | `components` | Kill card layout: `components` (a native Discord components card), `strip` (the `components` card with a portrait strip image; needs Attach Files), `block` (aligned monospace details, uniform width) or `fields` (inline fields, the older layout). Case-insensitive. |
 
 ### Secrets from files
 
@@ -252,11 +290,29 @@ nix build     # ./result/bin/chainsniffer
 nix run .     # with the variables already in the environment
 ```
 
+### Testing a build
+
+Every kill the relay posts is also saved, with the Wanderer payload it came in, to `last_kill.json`
+in the state directory. Starting a build with `CHAINSNIFFER_REPLAY_CHANNEL_ID` set to a test
+channel's ID puts it in replay mode: it posts that saved kill to the test channel and exits 0. The
+kill is decoded, classified, named and rendered by the build being tested, with its own settings,
+so changing `CHAINSNIFFER_CARD_STYLE` or the friendly IDs shows their effect on a real kill. The
+chain alias comes from the map's current topology.
+
+A replay skips the filters and the duplicate check, never opens the event stream, never posts to
+`CHAINSNIFFER_DISCORD_CHANNEL_ID` and never changes `state.json`. That makes it safe to point at
+the state directory of a relay that is running. The bot needs the same permissions on the test
+channel. With nothing saved yet, the replay exits 1 and says so.
+
+```sh
+CHAINSNIFFER_REPLAY_CHANNEL_ID=<test channel ID> ./result/bin/chainsniffer
+```
+
 ### Exit statuses
 
 | Status | Meaning |
 | --- | --- |
-| 0 | A clean shutdown on `SIGINT` or `SIGTERM`. |
+| 0 | A clean shutdown on `SIGINT` or `SIGTERM`, or a replay that posted. |
 | 1 | A failure needing an operator: a rejected token, a channel the bot cannot post to, a stream or topology request Wanderer refuses, an unusable state directory. |
 | 2 | A configuration the relay refuses to start with. Every bad variable is named on stderr. |
 
@@ -283,8 +339,9 @@ nix run .     # with the variables already in the environment
   posted. A system named or renamed afterwards shows its new alias on later kills only.
 - **The bot only writes.** No slash commands, no reading messages, and no map events other than
   kills, connection changes, system deletions and system metadata changes.
-- **No enrichment.** Posts carry what Wanderer sent, plus the system name from ESI. Nothing is
-  fetched from zKillboard or ESI's killmail endpoints.
+- **Little enrichment.** Posts carry what Wanderer sent, plus the system name and any missing
+  character, corporation and alliance names from ESI. Nothing is fetched from zKillboard or ESI's killmail
+  endpoints.
 
 ## Development
 
@@ -322,9 +379,11 @@ hash mismatch. To update it:
 | `internal/sse` | A generic SSE reader: framing only, `io.Reader` to events. |
 | `internal/wanderer` | The map stream client: requests, backoff, staleness watchdog, fatal statuses. |
 | `internal/killmail` | Payload decoding, the `Killmail` type, classification, filters. |
-| `internal/discord` | Embed rendering, the poster (rate limits, retries), the startup check. |
-| `internal/universe` | The ESI system-name resolver and its cache. |
-| `internal/state` | `state.json` and the bounded set of posted killmail IDs. |
+| `internal/discord` | Embed and components card rendering, the poster (rate limits, retries, file uploads), the startup check. |
+| `internal/universe` | The ESI resolver for system, corporation and alliance names, and its caches. |
+| `internal/eveimage` | The EVE image server fetcher for portraits and logos, with an in-memory cache. |
+| `internal/cardimage` | Draws the `strip` card's portrait strip PNG. |
+| `internal/state` | `state.json` and the bounded set of posted killmail IDs; the `names.json` name cache; `last_kill.json`. |
 | `internal/relay` | The pipeline: event to killmails to filter, dedupe, post, persist. |
 
 The specs this was built from live in `openspec/changes/archive/2026-10-14-add-killmail-relay-bot/`;

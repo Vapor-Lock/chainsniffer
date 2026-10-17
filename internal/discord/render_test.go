@@ -11,6 +11,7 @@ import (
 
 	"github.com/Vapor-Lock/chainsniffer/internal/discord"
 	"github.com/Vapor-Lock/chainsniffer/internal/killmail"
+	"github.com/bwmarrin/discordgo"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden embeds in testdata")
@@ -122,7 +123,7 @@ func typicalKill(t *testing.T) killmail.Killmail {
 // Render's layout is pinned by golden embeds in testdata; regenerate them with
 // `go test ./internal/discord -update` after a deliberate change.
 func TestRenderGolden(t *testing.T) {
-	tests := []struct {
+	cases := []struct {
 		name       string
 		golden     string
 		kill       killmail.Killmail
@@ -189,35 +190,57 @@ func TestRenderGolden(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := json.MarshalIndent(discord.Render(tc.kill, tc.class, tc.systemName, tc.alias), "", "  ")
-			if err != nil {
-				t.Fatalf("marshalling the embed: %v", err)
-			}
-			got = append(got, '\n')
+	// The block style's goldens are named render_<case>.json and the fields
+	// style's render_fields_<case>.json. The fields goldens are verbatim the
+	// cards the relay posted before the block style, so this proves the fields
+	// style still renders them unchanged.
+	styles := []struct {
+		style  discord.CardStyle
+		prefix string
+	}{
+		{discord.CardStyleBlock, "render_"},
+		{discord.CardStyleFields, "render_fields_"},
+	}
 
-			path := filepath.Join("testdata", tc.golden)
-			if *update {
-				if err := os.WriteFile(path, got, 0o644); err != nil {
-					t.Fatalf("writing the golden embed: %v", err)
-				}
-			}
-			want, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("reading the golden embed (run `go test ./internal/discord -update` to create it): %v", err)
-			}
-			if string(got) != string(want) {
-				t.Errorf("embed does not match %s\ngot:\n%s\nwant:\n%s", tc.golden, got, want)
-			}
-		})
+	for _, st := range styles {
+		for _, tc := range cases {
+			golden := st.prefix + strings.TrimPrefix(tc.golden, "render_")
+			t.Run(string(st.style)+"/"+tc.name, func(t *testing.T) {
+				testGolden(t, golden, discord.Render(tc.kill, tc.class, tc.systemName, tc.alias, st.style))
+			})
+		}
+	}
+}
+
+// testGolden compares the embed, marshalled as Discord receives it, with the
+// golden file in testdata, rewriting the file first under -update.
+func testGolden(t *testing.T, golden string, embed *discordgo.MessageEmbed) {
+	t.Helper()
+	got, err := json.MarshalIndent(embed, "", "  ")
+	if err != nil {
+		t.Fatalf("marshalling the embed: %v", err)
+	}
+	got = append(got, '\n')
+
+	path := filepath.Join("testdata", golden)
+	if *update {
+		if err := os.WriteFile(path, got, 0o644); err != nil {
+			t.Fatalf("writing the golden embed: %v", err)
+		}
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the golden embed (run `go test ./internal/discord -update` to create it): %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("embed does not match %s\ngot:\n%s\nwant:\n%s", golden, got, want)
 	}
 }
 
 // "Typical kill" and "Aligned rows": the title names the ship and the pilot,
 // and the block's rows carry everything the requirement lists, in order.
 func TestRenderTypicalKillContent(t *testing.T) {
-	embed := discord.Render(typicalKill(t), killmail.Kill, "J123456", "")
+	embed := discord.Render(typicalKill(t), killmail.Kill, "J123456", "", discord.CardStyleBlock)
 
 	if got, want := embed.Title, "Stratios — Pilot A"; got != want {
 		t.Errorf("Title = %q, want %q", got, want)
@@ -234,7 +257,7 @@ func TestRenderTypicalKillContent(t *testing.T) {
 		{"System", []string{"J123456"}},
 		{"Value", []string{"412.5M ISK"}},
 		{"Attackers", []string{"7"}},
-		{"Victim", []string{"[CORP] Victim Corporation", "<VCTM> Victim Alliance"}},
+		{"Victim", []string{"Pilot A", "[CORP] Victim Corporation", "<VCTM> Victim Alliance"}},
 		{"Final blow", []string{"Pilot B (Loki)", "[FRND] Friendly Corporation", "<BLUE> Friendly Alliance"}},
 	}
 	got := blockRows(t, embed.Description)
@@ -254,7 +277,7 @@ func TestRenderDropsEmptyRows(t *testing.T) {
 	k.TotalValue = 0
 	k.AttackerCount = 0
 	var labels []string
-	for _, r := range blockRows(t, discord.Render(k, killmail.Kill, "J123456", "").Description) {
+	for _, r := range blockRows(t, discord.Render(k, killmail.Kill, "J123456", "", discord.CardStyleBlock).Description) {
 		labels = append(labels, r.label)
 	}
 	if got, want := strings.Join(labels, ","), "System,Victim,Final blow"; got != want {
@@ -273,24 +296,24 @@ func TestRenderWrapsLongValues(t *testing.T) {
 		{
 			name:     "breaks at the last space that fits",
 			corpName: "The Exceedingly Long Corporation Name of Doom",
-			want:     []string{"[CORP] The Exceedingly Long", "Corporation Name of Doom", "<VCTM> Victim Alliance"},
+			want:     []string{"Pilot A", "[CORP] The Exceedingly Long", "Corporation Name of Doom", "<VCTM> Victim Alliance"},
 		},
 		{
 			name:     "hard-breaks a word longer than the column",
 			corpName: strings.Repeat("x", 40),
-			want:     []string{"[CORP]", strings.Repeat("x", 29), strings.Repeat("x", 11), "<VCTM> Victim Alliance"},
+			want:     []string{"Pilot A", "[CORP]", strings.Repeat("x", 29), strings.Repeat("x", 11), "<VCTM> Victim Alliance"},
 		},
 		{
 			name:     "fits exactly",
 			corpName: strings.Repeat("y", 22),
-			want:     []string{"[CORP] " + strings.Repeat("y", 22), "<VCTM> Victim Alliance"},
+			want:     []string{"Pilot A", "[CORP] " + strings.Repeat("y", 22), "<VCTM> Victim Alliance"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			k := typicalKill(t)
 			k.Victim.CorpName = tc.corpName
-			embed := discord.Render(k, killmail.Kill, "J123456", "")
+			embed := discord.Render(k, killmail.Kill, "J123456", "", discord.CardStyleBlock)
 			// blockRows fails the test on any line over 40 runes or with its
 			// value outside column 12.
 			if got, want := rowValues(t, embed.Description)["Victim"], strings.Join(tc.want, "\n"); got != want {
@@ -303,7 +326,7 @@ func TestRenderWrapsLongValues(t *testing.T) {
 // "zKillboard link" and "Links and images": the title links to the kill and
 // the thumbnail is the victim ship's render.
 func TestRenderLinksAndImages(t *testing.T) {
-	embed := discord.Render(typicalKill(t), killmail.Kill, "Thera", "")
+	embed := discord.Render(typicalKill(t), killmail.Kill, "Thera", "", discord.CardStyleBlock)
 
 	if got, want := embed.URL, "https://zkillboard.com/kill/123456789/"; got != want {
 		t.Errorf("URL = %q, want %q", got, want)
@@ -318,7 +341,7 @@ func TestRenderLinksAndImages(t *testing.T) {
 	// An unknown ship type has no render to show.
 	k := typicalKill(t)
 	k.Victim.ShipTypeID = 0
-	if thumb := discord.Render(k, killmail.Kill, "Thera", "").Thumbnail; thumb != nil {
+	if thumb := discord.Render(k, killmail.Kill, "Thera", "", discord.CardStyleBlock).Thumbnail; thumb != nil {
 		t.Errorf("Thumbnail = %+v, want nil when the ship type ID is unknown", thumb)
 	}
 }
@@ -337,7 +360,7 @@ func TestRenderClassificationStyling(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(string(tc.class), func(t *testing.T) {
-			embed := discord.Render(typicalKill(t), tc.class, "Thera", "")
+			embed := discord.Render(typicalKill(t), tc.class, "Thera", "", discord.CardStyleBlock)
 			if embed.Color != tc.wantColor {
 				t.Errorf("Color = %#x, want %#x", embed.Color, tc.wantColor)
 			}
@@ -371,7 +394,7 @@ func TestRenderPadsEveryClassification(t *testing.T) {
 		{"no thumbnail", noShip, false, 46},
 	} {
 		for _, class := range []killmail.Classification{killmail.Loss, killmail.Kill, killmail.Neutral} {
-			embed := discord.Render(tc.k, class, "Thera", "")
+			embed := discord.Render(tc.k, class, "Thera", "", discord.CardStyleBlock)
 			if (embed.Thumbnail != nil) != tc.thumbnail {
 				t.Fatalf("%s %s: Thumbnail = %+v", tc.name, class, embed.Thumbnail)
 			}
@@ -389,7 +412,7 @@ func TestRenderPadsEveryClassification(t *testing.T) {
 // "Missing optional fields": whatever the payload left out is dropped, and the
 // embed is still postable.
 func TestRenderDegradesGracefully(t *testing.T) {
-	embed := discord.Render(killmail.Killmail{ID: 42}, killmail.Neutral, "", "")
+	embed := discord.Render(killmail.Killmail{ID: 42}, killmail.Neutral, "", "", discord.CardStyleBlock)
 
 	if got, want := embed.Title, "Unknown ship — Unknown pilot"; got != want {
 		t.Errorf("Title = %q, want %q", got, want)
@@ -422,7 +445,7 @@ func TestRenderPartialAffiliations(t *testing.T) {
 			name:            "no alliance",
 			victim:          killmail.Party{CharName: "Pilot A", CorpTicker: "CORP", CorpName: "Victim Corporation", ShipName: "Stratios"},
 			finalBlow:       killmail.Party{CharName: "Pilot B", CorpName: "Friendly Corporation", ShipName: "Loki"},
-			wantVictim:      "[CORP] Victim Corporation",
+			wantVictim:      "Pilot A\n[CORP] Victim Corporation",
 			wantFinalBlow:   "Pilot B (Loki)\nFriendly Corporation",
 			wantTitlePrefix: "Stratios — Pilot A",
 		},
@@ -430,7 +453,7 @@ func TestRenderPartialAffiliations(t *testing.T) {
 			name:            "tickers only",
 			victim:          killmail.Party{CharName: "Pilot A", CorpTicker: "CORP", AllianceTicker: "VCTM", ShipName: "Stratios"},
 			finalBlow:       killmail.Party{AllianceTicker: "BLUE"},
-			wantVictim:      "[CORP]\n<VCTM>",
+			wantVictim:      "Pilot A\n[CORP]\n<VCTM>",
 			wantFinalBlow:   "<BLUE>",
 			wantTitlePrefix: "Stratios — Pilot A",
 		},
@@ -445,7 +468,7 @@ func TestRenderPartialAffiliations(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			k := killmail.Killmail{ID: 7, Victim: tc.victim, FinalBlow: tc.finalBlow}
-			embed := discord.Render(k, killmail.Neutral, "Thera", "")
+			embed := discord.Render(k, killmail.Neutral, "Thera", "", discord.CardStyleBlock)
 			if got := embed.Title; got != tc.wantTitlePrefix {
 				t.Errorf("Title = %q, want %q", got, tc.wantTitlePrefix)
 			}
@@ -464,7 +487,7 @@ func TestRenderPartialAffiliations(t *testing.T) {
 // returns the System row's value, its lines joined by newlines.
 func systemRow(t *testing.T, systemName, alias string) string {
 	t.Helper()
-	for _, r := range blockRows(t, discord.Render(typicalKill(t), killmail.Kill, systemName, alias).Description) {
+	for _, r := range blockRows(t, discord.Render(typicalKill(t), killmail.Kill, systemName, alias, discord.CardStyleBlock).Description) {
 		if r.label == "System" {
 			return strings.Join(r.lines, "\n")
 		}
@@ -511,13 +534,13 @@ func TestRenderNeutralisesBackticks(t *testing.T) {
 	k.Victim.AllianceTicker = "`A`"
 	k.FinalBlow.CharName = "Pilot `B`"
 	k.FinalBlow.ShipName = "Lo`ki"
-	embed := discord.Render(k, killmail.Kill, "J134349", "`HOTEL`")
+	embed := discord.Render(k, killmail.Kill, "J134349", "`HOTEL`", discord.CardStyleBlock)
 
 	if got := strings.Count(embed.Description, "```"); got != 2 {
 		t.Errorf("description has %d fences, want 2:\n%s", got, embed.Description)
 	}
 	rows := rowValues(t, embed.Description)
-	if got, want := rows["Victim"], "[CORP] Evil \u02cb\u02cb\u02cb Corp\n<\u02cbA\u02cb> Victim Alliance"; got != want {
+	if got, want := rows["Victim"], "Pilot A\n[CORP] Evil \u02cb\u02cb\u02cb Corp\n<\u02cbA\u02cb> Victim Alliance"; got != want {
 		t.Errorf("Victim row = %q, want %q", got, want)
 	}
 	if got, want := strings.Split(rows["Final blow"], "\n")[0], "Pilot \u02cbB\u02cb (Lo\u02cbki)"; got != want {
@@ -525,6 +548,74 @@ func TestRenderNeutralisesBackticks(t *testing.T) {
 	}
 	if got, want := rows["System"], "J134349 (\u02cbHOTEL\u02cb)"; got != want {
 		t.Errorf("System row = %q, want %q", got, want)
+	}
+}
+
+// "Typical kill in the fields style": inline fields in order, the affiliation
+// on one line joined by " / ", and no description.
+func TestRenderFieldsTypicalKill(t *testing.T) {
+	embed := discord.Render(typicalKill(t), killmail.Kill, "J123456", "", discord.CardStyleFields)
+
+	if got, want := embed.Title, "Stratios — Pilot A"; got != want {
+		t.Errorf("Title = %q, want %q", got, want)
+	}
+	if embed.Description != "" {
+		t.Errorf("Description = %q, want none in the fields style", embed.Description)
+	}
+	want := []discordgo.MessageEmbedField{
+		{Name: "System", Value: "J123456", Inline: true},
+		{Name: "Value", Value: "412.5M ISK", Inline: true},
+		{Name: "Attackers", Value: "7", Inline: true},
+		{Name: "Victim", Value: "[CORP] Victim Corporation / <VCTM> Victim Alliance", Inline: true},
+		{Name: "Final blow", Value: "Pilot B (Loki)\n[FRND] Friendly Corporation / <BLUE> Friendly Alliance", Inline: true},
+	}
+	if len(embed.Fields) != len(want) {
+		t.Fatalf("Fields = %+v, want %+v", embed.Fields, want)
+	}
+	for i := range want {
+		if *embed.Fields[i] != want[i] {
+			t.Errorf("field %d = %+v, want %+v", i, *embed.Fields[i], want[i])
+		}
+	}
+}
+
+// "Markdown characters in an alias, fields style": the alias is escaped so
+// Discord shows it literally, and capped.
+func TestRenderFieldsChainAlias(t *testing.T) {
+	long := strings.Repeat("a", 300)
+	tests := []struct {
+		name  string
+		alias string
+		want  string
+	}{
+		{name: "named system", alias: "HOTEL", want: "J134349 (HOTEL)"},
+		{name: "no alias", alias: "", want: "J134349"},
+		{name: "markdown escaped", alias: "A_B_", want: `J134349 (A\_B\_)`},
+		{name: "every markdown character", alias: "\\*_~`|", want: "J134349 (\\\\\\*\\_\\~\\`\\|)"},
+		{name: "capped", alias: long, want: "J134349 (" + long[:100] + ")"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			embed := discord.Render(typicalKill(t), killmail.Kill, "J134349", tc.alias, discord.CardStyleFields)
+			if len(embed.Fields) == 0 || embed.Fields[0].Name != "System" {
+				t.Fatalf("Fields = %+v, want System first", embed.Fields)
+			}
+			if got := embed.Fields[0].Value; got != tc.want {
+				t.Errorf("System field = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Every style but fields renders as the block style: strip and components
+// reuse the block embed, and an unknown style falls back to it.
+func TestRenderUnknownStyleIsBlock(t *testing.T) {
+	want := discord.Render(typicalKill(t), killmail.Kill, "J123456", "HOTEL", discord.CardStyleBlock)
+	for _, style := range []discord.CardStyle{discord.CardStyleStrip, discord.CardStyleComponents, "", "tiles"} {
+		got := discord.Render(typicalKill(t), killmail.Kill, "J123456", "HOTEL", style)
+		if got.Description != want.Description || len(got.Fields) != 0 {
+			t.Errorf("style %q: Description = %q, Fields = %+v, want the block card", style, got.Description, got.Fields)
+		}
 	}
 }
 

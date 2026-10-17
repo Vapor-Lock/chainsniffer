@@ -77,6 +77,7 @@ func TestLoadMinimal(t *testing.T) {
 		StateDir:               "/var/lib/chainsniffer",
 		LogLevel:               slog.LevelInfo,
 		LogFormat:              config.LogFormatText,
+		CardStyle:              config.CardStyleComponents,
 	}
 	// want leaves both friendly ID slices nil, which is what no configured
 	// friendly IDs has to produce.
@@ -93,6 +94,17 @@ func TestLoad(t *testing.T) {
 		setup func(t *testing.T, env map[string]string)
 		check func(t *testing.T, cfg *config.Config)
 	}{
+		{
+			name: "replay channel",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvReplayChannelID] = " 1560738628290875472 "
+			},
+			check: func(t *testing.T, cfg *config.Config) {
+				if cfg.ReplayChannelID != "1560738628290875472" {
+					t.Errorf("ReplayChannelID = %q", cfg.ReplayChannelID)
+				}
+			},
+		},
 		{
 			name: "trailing slashes stripped from the Wanderer URL",
 			setup: func(_ *testing.T, env map[string]string) {
@@ -265,6 +277,39 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
+			name: "card style is case insensitive",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvCardStyle] = "Fields"
+			},
+			check: func(t *testing.T, cfg *config.Config) {
+				if cfg.CardStyle != config.CardStyleFields {
+					t.Errorf("CardStyle = %q, want fields", cfg.CardStyle)
+				}
+			},
+		},
+		{
+			name: "strip card style",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvCardStyle] = "strip"
+			},
+			check: func(t *testing.T, cfg *config.Config) {
+				if cfg.CardStyle != config.CardStyleStrip {
+					t.Errorf("CardStyle = %q, want strip", cfg.CardStyle)
+				}
+			},
+		},
+		{
+			name: "components card style",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvCardStyle] = "Components"
+			},
+			check: func(t *testing.T, cfg *config.Config) {
+				if cfg.CardStyle != config.CardStyleComponents {
+					t.Errorf("CardStyle = %q, want components", cfg.CardStyle)
+				}
+			},
+		},
+		{
 			name: "every log level",
 			setup: func(_ *testing.T, env map[string]string) {
 				env[config.EnvLogLevel] = "warn"
@@ -389,6 +434,14 @@ func TestLoadErrors(t *testing.T) {
 				env[config.EnvWandererURL] = "ftp://wanderer.example"
 			},
 			want:     []string{config.EnvWandererURL, "http"},
+			problems: 1,
+		},
+		{
+			name: "replay channel ID that is not a snowflake",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvReplayChannelID] = "#test"
+			},
+			want:     []string{config.EnvReplayChannelID, "#test"},
 			problems: 1,
 		},
 		{
@@ -559,6 +612,14 @@ func TestLoadErrors(t *testing.T) {
 			problems: 1,
 		},
 		{
+			name: "unknown card style",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvCardStyle] = "table"
+			},
+			want:     []string{config.EnvCardStyle, "table", "block", "fields", "strip", "components"},
+			problems: 1,
+		},
+		{
 			name: "friendly-only without friendly IDs",
 			setup: func(_ *testing.T, env map[string]string) {
 				env[config.EnvFriendlyOnly] = "true"
@@ -714,6 +775,33 @@ func TestConfigLogValueIncludesTopology(t *testing.T) {
 	}
 }
 
+func TestConfigLogValueIncludesCardStyle(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{"": "card_style=components", "strip": "card_style=strip", "block": "card_style=block", "fields": "card_style=fields"}
+	for value, want := range tests {
+		t.Run(want, func(t *testing.T) {
+			t.Parallel()
+
+			env := baseEnv()
+			if value != "" {
+				env[config.EnvCardStyle] = value
+			}
+			cfg, err := config.Load(lookup(env))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+
+			var buf bytes.Buffer
+			slog.New(slog.NewTextHandler(&buf, nil)).Info("starting", "config", cfg)
+
+			if line := buf.String(); !strings.Contains(line, want) {
+				t.Errorf("log line %q does not contain %q", line, want)
+			}
+		})
+	}
+}
+
 func TestConfigLogValueOmitsUnsetHomeSystem(t *testing.T) {
 	t.Parallel()
 
@@ -728,6 +816,9 @@ func TestConfigLogValueOmitsUnsetHomeSystem(t *testing.T) {
 	line := buf.String()
 	if strings.Contains(line, "home_system_id") {
 		t.Errorf("log line %q mentions home_system_id without a home system", line)
+	}
+	if strings.Contains(line, "replay_channel_id") {
+		t.Errorf("log line %q mentions replay_channel_id without a replay channel", line)
 	}
 	if !strings.Contains(line, "topology_resync_interval=15m0s") {
 		t.Errorf("log line %q does not contain the resync interval", line)

@@ -2,6 +2,7 @@ package discord
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -51,7 +52,7 @@ func TestPostSucceeds(t *testing.T) {
 	fake, url := newFakeDiscord(t)
 	poster, hooks := newPoster(t, url)
 
-	if err := poster.Post(context.Background(), testEmbed()); err != nil {
+	if err := poster.Post(context.Background(), testMessage()); err != nil {
 		t.Fatalf("Post() = %v", err)
 	}
 
@@ -72,7 +73,7 @@ func TestPostOrderIsPreserved(t *testing.T) {
 	poster, _ := newPoster(t, url)
 
 	for _, title := range []string{"first", "second", "third"} {
-		if err := poster.Post(context.Background(), &discordgo.MessageEmbed{Title: title}); err != nil {
+		if err := poster.Post(context.Background(), Message{Embed: &discordgo.MessageEmbed{Title: title}}); err != nil {
 			t.Fatalf("Post(%q) = %v", title, err)
 		}
 	}
@@ -92,7 +93,7 @@ func TestPostRetriesBadGateway(t *testing.T) {
 	fake.postStatuses = []int{http.StatusBadGateway, http.StatusBadGateway, 0}
 	poster, hooks := newPoster(t, url)
 
-	if err := poster.Post(context.Background(), testEmbed()); err != nil {
+	if err := poster.Post(context.Background(), testMessage()); err != nil {
 		t.Fatalf("Post() = %v", err)
 	}
 	if got := len(fake.posted()); got != 1 {
@@ -113,7 +114,7 @@ func TestPostRetriesServiceUnavailable(t *testing.T) {
 	fake.postStatuses = []int{http.StatusServiceUnavailable, http.StatusServiceUnavailable, 0}
 	poster, hooks := newPoster(t, url)
 
-	if err := poster.Post(context.Background(), testEmbed()); err != nil {
+	if err := poster.Post(context.Background(), testMessage()); err != nil {
 		t.Fatalf("Post() = %v", err)
 	}
 	if got := len(fake.posted()); got != 1 {
@@ -130,7 +131,7 @@ func TestPostGivesUpWhenBudgetIsSpent(t *testing.T) {
 	budget := 10 * time.Second
 	poster, hooks := newPoster(t, url, WithRetryBudget(budget))
 
-	err := poster.Post(context.Background(), testEmbed())
+	err := poster.Post(context.Background(), testMessage())
 
 	var gaveUp *GaveUpError
 	if !errors.As(err, &gaveUp) {
@@ -160,7 +161,7 @@ func TestPostWaitsOutRateLimit(t *testing.T) {
 	fake.postStatuses = []int{http.StatusTooManyRequests, 0}
 	poster, hooks := newPoster(t, url)
 
-	if err := poster.Post(context.Background(), testEmbed()); err != nil {
+	if err := poster.Post(context.Background(), testMessage()); err != nil {
 		t.Fatalf("Post() = %v", err)
 	}
 	if got := len(fake.posted()); got != 1 {
@@ -202,7 +203,7 @@ func TestPostBurstUnderRateLimit(t *testing.T) {
 	for i := range burst {
 		title := fmt.Sprintf("kill %02d", i)
 		want = append(want, title)
-		if err := poster.Post(context.Background(), &discordgo.MessageEmbed{Title: title}); err != nil {
+		if err := poster.Post(context.Background(), Message{Embed: &discordgo.MessageEmbed{Title: title}}); err != nil {
 			t.Fatalf("Post(%q) = %v", title, err)
 		}
 	}
@@ -230,7 +231,7 @@ func TestPostRetriesRateLimitDiscordgoDeclined(t *testing.T) {
 	poster, hooks := newPoster(t, url)
 	poster.session.ShouldRetryOnRateLimit = false
 
-	if err := poster.Post(context.Background(), testEmbed()); err != nil {
+	if err := poster.Post(context.Background(), testMessage()); err != nil {
 		t.Fatalf("Post() = %v", err)
 	}
 	if got := len(fake.posted()); got != 1 {
@@ -287,7 +288,7 @@ func TestPostFatalStatuses(t *testing.T) {
 			fake.postStatuses = []int{tc.status}
 			poster, hooks := newPoster(t, url)
 
-			err := poster.Post(context.Background(), testEmbed())
+			err := poster.Post(context.Background(), testMessage())
 
 			var fatal *FatalError
 			if !errors.As(err, &fatal) {
@@ -315,7 +316,7 @@ func TestPostBadRequestIsNotRetried(t *testing.T) {
 	fake.postStatuses = []int{http.StatusBadRequest}
 	poster, _ := newPoster(t, url)
 
-	err := poster.Post(context.Background(), testEmbed())
+	err := poster.Post(context.Background(), testMessage())
 	if err == nil {
 		t.Fatal("Post() = nil, want an error")
 	}
@@ -337,11 +338,244 @@ func TestPostStopsOnCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := poster.Post(ctx, testEmbed())
+	err := poster.Post(ctx, testMessage())
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Post() = %v, want context.Canceled", err)
 	}
 	if got := fake.count("/messages"); got > 1 {
 		t.Errorf("fake served %d posts, want at most 1", got)
+	}
+}
+
+// testStrip is an embed card with a PNG attached, as the strip style posts it.
+func testStrip() Message {
+	embed := testEmbed()
+	embed.Image = &discordgo.MessageEmbedImage{URL: "attachment://kill.png"}
+	return Message{
+		Embed: embed,
+		Files: []File{{Name: "kill.png", ContentType: "image/png", Data: []byte("\x89PNG\r\n\x1a\nfake image")}},
+	}
+}
+
+// testComponents is a components card.
+func testComponents() Message {
+	return Message{Components: []Component{
+		Container(0x2ECC71, TextDisplay("### Stratios — Pilot A"), Separator(), TextDisplay("-# Kill")),
+	}}
+}
+
+func TestPostUploadsFiles(t *testing.T) {
+	fake, url := newFakeDiscord(t)
+	poster, _ := newPoster(t, url)
+	msg := testStrip()
+
+	if err := poster.Post(context.Background(), msg); err != nil {
+		t.Fatalf("Post() = %v", err)
+	}
+
+	received := fake.received()
+	if len(received) != 1 {
+		t.Fatalf("fake served %d posts, want 1", len(received))
+	}
+	sent := received[0]
+	if !strings.HasPrefix(sent.ContentType, "multipart/form-data") {
+		t.Errorf("Content-Type = %q, want a multipart upload", sent.ContentType)
+	}
+	if len(sent.Embeds) != 1 || sent.Embeds[0].Image == nil || sent.Embeds[0].Image.URL != "attachment://kill.png" {
+		t.Errorf("embeds = %+v, want the one embed showing attachment://kill.png", sent.Embeds)
+	}
+	want := msg.Files[0]
+	if len(sent.Files) != 1 {
+		t.Fatalf("upload carried %d files, want 1", len(sent.Files))
+	}
+	if got := sent.Files[0]; got.Name != want.Name || got.ContentType != want.ContentType || string(got.Data) != string(want.Data) {
+		t.Errorf("uploaded file = %q (%s, %q), want %q (%s, %q)",
+			got.Name, got.ContentType, got.Data, want.Name, want.ContentType, want.Data)
+	}
+}
+
+// A retried upload sends the whole file again, not a reader drained by the
+// first attempt.
+func TestPostUploadsFilesAgainOnRetry(t *testing.T) {
+	fake, url := newFakeDiscord(t)
+	fake.postStatuses = []int{http.StatusServiceUnavailable, http.StatusTooManyRequests, 0}
+	poster, _ := newPoster(t, url)
+	msg := testStrip()
+
+	if err := poster.Post(context.Background(), msg); err != nil {
+		t.Fatalf("Post() = %v", err)
+	}
+
+	received := fake.received()
+	if len(received) != 3 {
+		t.Fatalf("fake served %d posts, want 3", len(received))
+	}
+	for i, sent := range received {
+		if len(sent.Files) != 1 || string(sent.Files[0].Data) != string(msg.Files[0].Data) {
+			t.Errorf("attempt %d carried files %+v, want the whole %q", i+1, sent.Files, msg.Files[0].Name)
+		}
+	}
+	if got := len(fake.posted()); got != 1 {
+		t.Errorf("fake accepted %d embeds, want 1", got)
+	}
+}
+
+func TestPostComponents(t *testing.T) {
+	fake, url := newFakeDiscord(t)
+	poster, _ := newPoster(t, url)
+	msg := testComponents()
+
+	if err := poster.Post(context.Background(), msg); err != nil {
+		t.Fatalf("Post() = %v", err)
+	}
+
+	received := fake.received()
+	if len(received) != 1 {
+		t.Fatalf("fake served %d posts, want 1", len(received))
+	}
+	sent := received[0]
+	if sent.Flags != 32768 {
+		t.Errorf("flags = %d, want 32768 (IS_COMPONENTS_V2)", sent.Flags)
+	}
+	if len(sent.Embeds) != 0 {
+		t.Errorf("embeds = %+v, want none in a components message", sent.Embeds)
+	}
+	want, err := json.Marshal(msg.Components)
+	if err != nil {
+		t.Fatalf("marshalling the components: %v", err)
+	}
+	if string(sent.Components) != string(want) {
+		t.Errorf("components = %s, want %s", sent.Components, want)
+	}
+	if len(sent.Files) != 0 || !strings.HasPrefix(sent.ContentType, "application/json") {
+		t.Errorf("Content-Type = %q with %d files, want a plain JSON body", sent.ContentType, len(sent.Files))
+	}
+}
+
+// The strip card is a components message with its PNG: one multipart upload
+// carrying the flags, the components and the file, sent whole again on retry.
+func TestPostComponentsWithFiles(t *testing.T) {
+	fake, url := newFakeDiscord(t)
+	fake.postStatuses = []int{http.StatusServiceUnavailable, 0}
+	poster, _ := newPoster(t, url)
+	msg := testComponents()
+	msg.Components[0].Components = append(msg.Components[0].Components, MediaGallery("attachment://kill.png"))
+	msg.Files = testStrip().Files
+
+	if err := poster.Post(context.Background(), msg); err != nil {
+		t.Fatalf("Post() = %v", err)
+	}
+
+	received := fake.received()
+	if len(received) != 2 {
+		t.Fatalf("fake served %d posts, want 2", len(received))
+	}
+	want, err := json.Marshal(msg.Components)
+	if err != nil {
+		t.Fatalf("marshalling the components: %v", err)
+	}
+	for i, sent := range received {
+		if !strings.HasPrefix(sent.ContentType, "multipart/form-data") {
+			t.Errorf("attempt %d: Content-Type = %q, want a multipart upload", i+1, sent.ContentType)
+		}
+		if sent.Flags != 32768 || len(sent.Embeds) != 0 {
+			t.Errorf("attempt %d: flags = %d with %d embeds, want 32768 (IS_COMPONENTS_V2) and none", i+1, sent.Flags, len(sent.Embeds))
+		}
+		if string(sent.Components) != string(want) {
+			t.Errorf("attempt %d: components = %s, want %s", i+1, sent.Components, want)
+		}
+		if len(sent.Files) != 1 || sent.Files[0].Name != "kill.png" || string(sent.Files[0].Data) != string(msg.Files[0].Data) {
+			t.Errorf("attempt %d: files = %+v, want the whole kill.png", i+1, sent.Files)
+		}
+	}
+}
+
+// A components post is rate limited and retried like an embed.
+func TestPostComponentsRetries(t *testing.T) {
+	fake, url := newFakeDiscord(t)
+	fake.postStatuses = []int{http.StatusTooManyRequests, http.StatusServiceUnavailable, 0}
+	poster, hooks := newPoster(t, url)
+
+	if err := poster.Post(context.Background(), testComponents()); err != nil {
+		t.Fatalf("Post() = %v", err)
+	}
+	if got := fake.count("/messages"); got != 3 {
+		t.Errorf("fake served %d posts, want 3", got)
+	}
+	if want := []time.Duration{defaultBackoff}; !slices.Equal(hooks.clock.slept, want) {
+		t.Errorf("Post slept %v, want %v: discordgo waits out the 429, the poster the 503", hooks.clock.slept, want)
+	}
+}
+
+func TestPostComponentsForbiddenIsFatal(t *testing.T) {
+	fake, url := newFakeDiscord(t)
+	fake.postStatuses = []int{http.StatusForbidden}
+	poster, _ := newPoster(t, url)
+
+	err := poster.Post(context.Background(), testComponents())
+
+	var fatal *FatalError
+	if !errors.As(err, &fatal) || fatal.Status != http.StatusForbidden {
+		t.Fatalf("Post() = %v, want a *FatalError for 403", err)
+	}
+	if got := fake.count("/messages"); got != 1 {
+		t.Errorf("fake served %d posts, want 1: a fatal error must not be retried", got)
+	}
+}
+
+// The 403/404 hint names Attach Files only when the cards upload files.
+func TestPostFatalHintNamesAttachFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		attachFiles bool
+	}{
+		{name: "embeds only", attachFiles: false},
+		{name: "with files", attachFiles: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake, url := newFakeDiscord(t)
+			fake.postStatuses = []int{http.StatusForbidden}
+			poster, _ := newPoster(t, url, WithAttachFiles(tc.attachFiles))
+
+			err := poster.Post(context.Background(), testMessage())
+
+			var fatal *FatalError
+			if !errors.As(err, &fatal) {
+				t.Fatalf("Post() = %v, want a *FatalError", err)
+			}
+			if !strings.Contains(fatal.Hint, "View Channel, Send Messages, Embed Links") {
+				t.Errorf("hint = %q, want it to name the embed permissions", fatal.Hint)
+			}
+			if got := strings.Contains(fatal.Hint, "Attach Files"); got != tc.attachFiles {
+				t.Errorf("hint = %q, names Attach Files = %t, want %t", fatal.Hint, got, tc.attachFiles)
+			}
+		})
+	}
+}
+
+func TestPostRejectsMalformedMessages(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		msg  Message
+	}{
+		{name: "empty", msg: Message{}},
+		{name: "embed and components", msg: Message{Embed: testEmbed(), Components: testComponents().Components}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake, url := newFakeDiscord(t)
+			poster, _ := newPoster(t, url)
+
+			err := poster.Post(context.Background(), tc.msg)
+			if err == nil {
+				t.Fatal("Post() = nil, want an error")
+			}
+			var fatal *FatalError
+			if errors.As(err, &fatal) {
+				t.Errorf("Post() = %v, want a plain error: a malformed card is not the operator's fault", err)
+			}
+			if got := fake.count("/messages"); got != 0 {
+				t.Errorf("fake served %d posts, want 0", got)
+			}
+		})
 	}
 }

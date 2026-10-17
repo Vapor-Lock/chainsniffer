@@ -35,7 +35,7 @@
           #   3. put that hash back here and re-run `nix build`
           #
           # (`nix build 2>&1 | grep got:` does steps 2 and 3's reading in one go.)
-          vendorHash = "sha256-6++apEXqL1xhCFUu/W6OjWyu/f72LpmnK25xqmZva7Q=";
+          vendorHash = "sha256-u3NrcZYeld019Zx0RQ8xS/O3uXrVyRYNet5/cecmfus=";
 
           subPackages = [ "cmd/chainsniffer" ];
 

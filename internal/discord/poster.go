@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,14 +53,19 @@ type Poster struct {
 	openGateway  func() error
 	closeGateway func() error
 
+	// attachFiles adds Attach Files to the permissions the bot needs, for
+	// cards that upload an image.
+	attachFiles bool
+
 	mu          sync.Mutex
 	gatewayOpen bool
 }
 
 type options struct {
-	logger  *slog.Logger
-	baseURL string
-	budget  time.Duration
+	logger      *slog.Logger
+	baseURL     string
+	budget      time.Duration
+	attachFiles bool
 }
 
 // An Option configures a Poster at New time.
@@ -79,6 +85,13 @@ func WithLogger(l *slog.Logger) Option {
 // select DefaultRetryBudget.
 func WithRetryBudget(d time.Duration) Option {
 	return func(o *options) { o.budget = d }
+}
+
+// WithAttachFiles makes Attach Files one of the permissions the bot needs on
+// the channel: the startup check requires it, and the hint for a 403 or 404
+// names it. Set it when the cards carry files, as the strip style's do.
+func WithAttachFiles(on bool) Option {
+	return func(o *options) { o.attachFiles = on }
 }
 
 // WithBaseURL points the Poster at another Discord API root, such as
@@ -133,14 +146,15 @@ func New(token, channelID string, opts ...Option) (*Poster, error) {
 	}
 
 	p := &Poster{
-		session:    session,
-		channelID:  channelID,
-		logger:     o.logger,
-		budget:     o.budget,
-		backoff:    defaultBackoff,
-		maxBackoff: defaultMaxBackoff,
-		now:        time.Now,
-		sleep:      sleepContext,
+		session:     session,
+		channelID:   channelID,
+		logger:      o.logger,
+		budget:      o.budget,
+		attachFiles: o.attachFiles,
+		backoff:     defaultBackoff,
+		maxBackoff:  defaultMaxBackoff,
+		now:         time.Now,
+		sleep:       sleepContext,
 	}
 	p.openGateway = session.Open
 	p.closeGateway = session.Close
@@ -150,7 +164,8 @@ func New(token, channelID string, opts ...Option) (*Poster, error) {
 // ChannelID is the channel the Poster posts to.
 func (p *Poster) ChannelID() string { return p.channelID }
 
-// Post sends embed to the configured channel as a single message.
+// Post sends msg to the configured channel as a single message: an embed or a
+// Components V2 layout, with its files.
 //
 // Rate limits are discordgo's business: it waits out a 429's retry_after and
 // resends the same message. Post adds a retry budget for the failures
@@ -162,12 +177,15 @@ func (p *Poster) ChannelID() string { return p.channelID }
 // A *FatalError means an operator has to change something: the bot token, the
 // channel ID, or the bot's permissions on the channel. The relay exits
 // non-zero rather than retrying.
-func (p *Poster) Post(ctx context.Context, embed *discordgo.MessageEmbed) error {
+func (p *Poster) Post(ctx context.Context, msg Message) error {
+	if err := msg.validate(); err != nil {
+		return fmt.Errorf("discord: post to channel %s: %w", p.channelID, err)
+	}
 	start := p.now()
 	delay := p.backoff
 
 	for attempt := 1; ; attempt++ {
-		_, err := p.session.ChannelMessageSendEmbed(p.channelID, embed, discordgo.WithContext(ctx))
+		err := p.send(ctx, msg)
 		if err == nil {
 			return nil
 		}
@@ -180,7 +198,7 @@ func (p *Poster) Post(ctx context.Context, embed *discordgo.MessageEmbed) error 
 		class, status := classify(err)
 		switch class {
 		case classFatal:
-			return &FatalError{Op: "post", Status: status, Hint: hintFor(status), Err: err}
+			return &FatalError{Op: "post", Status: status, Hint: p.hintFor(status), Err: err}
 		case classPermanent:
 			return fmt.Errorf("discord: post to channel %s: %w", p.channelID, err)
 		}
@@ -196,6 +214,28 @@ func (p *Poster) Post(ctx context.Context, embed *discordgo.MessageEmbed) error 
 		}
 		delay = min(2*delay, p.maxBackoff)
 	}
+}
+
+// send makes one attempt at posting msg.
+func (p *Poster) send(ctx context.Context, msg Message) error {
+	endpoint := discordgo.EndpointChannelMessages(p.channelID)
+	if len(msg.Components) > 0 {
+		body := componentsBody{Flags: flagComponentsV2, Components: msg.Components}
+		if len(msg.Files) == 0 {
+			_, err := p.session.RequestWithBucketID(http.MethodPost, endpoint, body, endpoint, discordgo.WithContext(ctx))
+			return err
+		}
+		// Files go up as a multipart body beside the JSON, as discordgo does
+		// for an embed's; it has no call that takes components and files.
+		contentType, data, err := discordgo.MultipartBodyWithJSON(body, msg.files())
+		if err != nil {
+			return err
+		}
+		_, err = p.session.RequestRaw(http.MethodPost, endpoint, contentType, data, endpoint, 0, discordgo.WithContext(ctx))
+		return err
+	}
+	_, err := p.session.ChannelMessageSendComplex(p.channelID, msg.send(), discordgo.WithContext(ctx))
+	return err
 }
 
 // A FatalError reports a rejection retrying cannot fix: a token Discord
@@ -279,13 +319,13 @@ func classify(err error) (class, int) {
 }
 
 // hintFor returns what an operator has to change to get past a fatal status.
-func hintFor(status int) string {
+func (p *Poster) hintFor(status int) string {
 	switch status {
 	case http.StatusUnauthorized:
 		return "Discord rejected the bot token"
 	case http.StatusForbidden, http.StatusNotFound:
-		return "bot needs View Channel, Send Messages, Embed Links on the channel, " +
-			"and the channel ID must name a channel it can see"
+		return "bot needs " + strings.Join(requiredPermissionNames(p.attachFiles), ", ") +
+			" on the channel, and the channel ID must name a channel it can see"
 	}
 	return ""
 }

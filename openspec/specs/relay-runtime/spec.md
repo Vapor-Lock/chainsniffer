@@ -159,3 +159,78 @@ is set. The home system SHALL only enable the linked-system filter.
 #### Scenario: Startup summary
 - **WHEN** the relay starts
 - **THEN** the startup configuration log line includes the resync interval, and the home system ID when one is configured
+
+### Requirement: Card style configuration
+The relay SHALL read the optional setting `CHAINSNIFFER_CARD_STYLE`, case-insensitively, as `block`,
+`fields`, `strip` or `components`, defaulting to `components`, and SHALL post every kill card in that
+style. Any other value SHALL be a configuration error that exits with status 2 and names the
+variable. The startup configuration summary SHALL include the card style.
+
+#### Scenario: Default style
+- **WHEN** `CHAINSNIFFER_CARD_STYLE` is unset
+- **THEN** kill cards are posted in the `components` style and the startup summary says `components`
+
+#### Scenario: Old style chosen
+- **WHEN** `CHAINSNIFFER_CARD_STYLE` is `Fields`
+- **THEN** kill cards are posted in the `fields` style
+
+#### Scenario: Component cards chosen
+- **WHEN** `CHAINSNIFFER_CARD_STYLE` is `components`
+- **THEN** kill cards are posted as component messages
+
+#### Scenario: Unknown style
+- **WHEN** `CHAINSNIFFER_CARD_STYLE` is `table`
+- **THEN** the relay exits with status 2 and names `CHAINSNIFFER_CARD_STYLE`, before connecting anywhere
+
+### Requirement: Persistent name cache
+The relay SHALL keep every corporation and alliance name and ticker, and every character name, it
+resolves in a JSON file `names.json` in the state directory, and SHALL NOT look up an ID found there again, including after
+a restart. Entries SHALL never expire. A missing `names.json` SHALL start an empty cache; an
+unreadable one SHALL be moved aside as `names.json.corrupt` with a warning and replaced by an empty
+cache. Neither SHALL affect `state.json`.
+
+#### Scenario: Names survive restart
+- **WHEN** the relay resolves corporation `98735003`, is stopped and started again, and a later kill names corporation `98735003` without its name
+- **THEN** the embed shows the corporation's name and ticker and no lookup is made for it
+
+#### Scenario: Corrupt name cache
+- **WHEN** `names.json` contains invalid JSON at startup
+- **THEN** the relay renames it to `names.json.corrupt`, logs a warning, resumes from the event ID in `state.json`, and resolves names afresh
+
+#### Scenario: Failed lookups are not stored
+- **WHEN** ESI cannot be reached while resolving alliance `99014747`
+- **THEN** nothing is written for it to `names.json`, and the next kill naming it tries again
+
+### Requirement: Last posted kill
+After Discord accepts a kill, the relay SHALL save that kill's ID and the `map_kill` payload it
+arrived in to `last_kill.json` in the state directory, replacing the kill saved before. A kill that
+is filtered, a duplicate, or not accepted by Discord SHALL NOT be saved. A failed save SHALL be
+logged and SHALL NOT affect the post or `state.json`.
+
+#### Scenario: Posted kill saved
+- **WHEN** an event carries killmails `1` and `2`, and both are posted
+- **THEN** `last_kill.json` holds killmail `2` and the event's payload
+
+#### Scenario: Filtered kill not saved
+- **WHEN** killmail `3` is dropped as an NPC kill after killmail `2` was posted
+- **THEN** `last_kill.json` still holds killmail `2`
+
+### Requirement: Replay the last kill
+When `CHAINSNIFFER_REPLAY_CHANNEL_ID` is set to a Discord channel ID, the process SHALL check the bot
+can post to that channel, post the kill saved in `last_kill.json` there in the configured card
+style, classified with the configured friendly IDs and named as a live kill is, and exit with
+status 0. It SHALL NOT open the event stream, post to `CHAINSNIFFER_DISCORD_CHANNEL_ID`, apply the
+filters or the duplicate check, or change `state.json`. A value that is not a channel ID SHALL be a
+configuration error, exiting with status 2.
+
+#### Scenario: Replay to a test channel
+- **WHEN** a relay has posted killmail `128412345`, and the process is then started with `CHAINSNIFFER_REPLAY_CHANNEL_ID` set to a test channel
+- **THEN** the test channel receives killmail `128412345`'s card, nothing is posted to the relay's channel, the stream is not opened, `state.json` is unchanged, and the process exits 0
+
+#### Scenario: Nothing saved
+- **WHEN** the process is started with `CHAINSNIFFER_REPLAY_CHANNEL_ID` set and no `last_kill.json` in the state directory
+- **THEN** it logs that there is no kill to replay, posts nothing, and exits 1
+
+#### Scenario: Not a channel ID
+- **WHEN** `CHAINSNIFFER_REPLAY_CHANNEL_ID` is `#test`
+- **THEN** the process exits with status 2 and names `CHAINSNIFFER_REPLAY_CHANNEL_ID`

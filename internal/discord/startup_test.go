@@ -200,3 +200,47 @@ func containsRequest(requests []string, want string) bool {
 	}
 	return false
 }
+
+// Attach Files is required only when the cards upload files.
+func TestStartupAttachFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		attachFiles bool
+		granted     bool
+		wantErr     bool
+	}{
+		{name: "not needed, not granted", attachFiles: false, granted: false, wantErr: false},
+		{name: "needed, granted", attachFiles: true, granted: true, wantErr: false},
+		{name: "needed, not granted", attachFiles: true, granted: false, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake, url := newFakeDiscord(t)
+			if tc.granted {
+				fake.permissions |= discordgo.PermissionAttachFiles
+			}
+			poster, hooks := newPoster(t, url, WithAttachFiles(tc.attachFiles))
+
+			err := poster.Startup(context.Background())
+
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("Startup() = %v, want nil", err)
+				}
+				return
+			}
+			var fatal *FatalError
+			if !errors.As(err, &fatal) {
+				t.Fatalf("Startup() = %v, want a *FatalError", err)
+			}
+			if !strings.Contains(fatal.Err.Error(), "missing Attach Files") {
+				t.Errorf("Startup() = %q, want it to name the missing Attach Files permission", err)
+			}
+			if !strings.Contains(fatal.Hint, "Attach Files") {
+				t.Errorf("hint = %q, want it to name Attach Files", fatal.Hint)
+			}
+			if hooks.opens != 0 {
+				t.Errorf("gateway opened %d times, want 0", hooks.opens)
+			}
+		})
+	}
+}

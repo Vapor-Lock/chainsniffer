@@ -1,0 +1,64 @@
+[
+  {
+    "type": 17,
+    "components": [
+      {
+        "type": 9,
+        "components": [
+          {
+            "type": 10,
+            "content": "### [Stratios — Pilot A](https://zkillboard.com/kill/123456789/)"
+          }
+        ],
+        "accessory": {
+          "type": 11,
+          "media": {
+            "url": "https://images.evetech.net/types/33470/render?size=128"
+          }
+        }
+      },
+      {
+        "type": 10,
+        "content": "```\nSystem     J123456\nValue      412.5M ISK\nAttackers  7\nVictim     Pilot A\n           [CORP] Victim Corporation\n           \u003cVCTM\u003e Victim Alliance\nFinal blow Pilot B (Loki)\n```"
+      },
+      {
+        "type": 14
+      },
+      {
+        "type": 9,
+        "components": [
+          {
+            "type": 10,
+            "content": "**Pilot A**\nStratios\n[CORP] / \u003cVCTM\u003e"
+          }
+        ],
+        "accessory": {
+          "type": 11,
+          "media": {
+            "url": "https://images.evetech.net/alliances/99123456/logo?size=128"
+          }
+        }
+      },
+      {
+        "type": 9,
+        "components": [
+          {
+            "type": 10,
+            "content": "**Pilot B**\nLoki"
+          }
+        ],
+        "accessory": {
+          "type": 11,
+          "media": {
+            "url": "https://images.evetech.net/characters/95000002/portrait?size=128"
+          }
+        }
+      },
+      {
+        "type": 10,
+        "content": "-# Kill · \u003ct:1791916927:f\u003e"
+      }
+    ],
+    "accent_color": 2600544
+  }
+]

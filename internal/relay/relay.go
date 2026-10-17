@@ -4,15 +4,16 @@
 //
 // Handle is what internal/wanderer calls for every event, in stream order, and
 // it dispatches on the event type. For each killmail a map_kill event carries
-// it skips the ones already posted, applies the filters, resolves the system
-// name and the chain alias, renders the embed and posts it, recording the kill
-// as posted only once Discord has accepted it. A topology event
-// (deleted_system, connection_added, connection_removed,
+// it skips the ones already posted, applies the filters, fills in the
+// corporation and alliance names the payload left out, resolves the system
+// name and the chain alias, renders the card in the configured style and
+// posts it, recording the kill as posted only once Discord has accepted it. A
+// topology event (deleted_system, connection_added, connection_removed,
 // system_metadata_changed) goes to the [Topology], when one is configured,
 // which keeps the map graph the linked-system filter reads and the chain
-// aliases the [Aliases] answer from. Once the whole event is
-// handled — and not before — the cursor moves to the event's ID and the state
-// is written to disk, whatever the event's type.
+// aliases the [Aliases] answer from. Once the whole event is handled — and
+// not before — the cursor moves to the event's ID and the state is written to
+// disk, whatever the event's type.
 //
 // That order is what makes the relay at-least-once on the stream and
 // at-most-once on Discord: a crash halfway through an event replays the event
@@ -30,12 +31,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
 	"log/slog"
+	"sync"
+	"time"
 
+	"github.com/Vapor-Lock/chainsniffer/internal/cardimage"
 	"github.com/Vapor-Lock/chainsniffer/internal/discord"
 	"github.com/Vapor-Lock/chainsniffer/internal/killmail"
+	"github.com/Vapor-Lock/chainsniffer/internal/universe"
 	"github.com/Vapor-Lock/chainsniffer/internal/wanderer"
-	"github.com/bwmarrin/discordgo"
 )
 
 // FilterDuplicate is the reason logged for a killmail that is dropped because
@@ -61,7 +66,7 @@ const (
 // that one killmail, which costs the killmail alone, or hit something an
 // operator has to fix — see [IsFatalPost].
 type Poster interface {
-	Post(ctx context.Context, embed *discordgo.MessageEmbed) error
+	Post(ctx context.Context, msg discord.Message) error
 }
 
 // Resolver resolves a solar system ID to the name an embed shows.
@@ -103,6 +108,55 @@ type Aliases interface {
 	Alias(id int64) string
 }
 
+// Affiliations resolves character, corporation and alliance IDs to the names
+// and tickers an embed shows, for the parties whose payload carried the ID
+// alone. A character has a name and no ticker.
+//
+// It is internal/universe's resolver, backed by the names.json cache. A lookup
+// that fails returns false, and the embed leaves that part out.
+type Affiliations interface {
+	Corporation(ctx context.Context, id int64) (universe.Entity, bool)
+	Alliance(ctx context.Context, id int64) (universe.Entity, bool)
+	Character(ctx context.Context, id int64) (universe.Entity, bool)
+}
+
+// Images fetches the portraits and logos the strip card style draws.
+//
+// It is internal/eveimage's fetcher. The URL methods return "" for an ID of
+// zero or less, and Fetch returns false for the empty URL and for an image it
+// could not fetch or decode, which the strip draws as a blank tile.
+type Images interface {
+	CharacterPortrait(id int64, size int) string
+	CorporationLogo(id int64, size int) string
+	AllianceLogo(id int64, size int) string
+	Fetch(ctx context.Context, url string) (image.Image, bool)
+}
+
+// LastKill keeps the last kill the relay posted, with the payload it arrived
+// in, for a later build to replay to a test channel (see [Relay.Replay]).
+//
+// It is internal/state's last-kill file. Save logs and swallows its own
+// failures: the file only serves replays and never fails a post.
+type LastKill interface {
+	Save(killmailID int64, payload json.RawMessage)
+}
+
+// The sizes the strip's images are fetched at: the portrait and logo tiles
+// cardimage draws them into.
+const (
+	portraitSize = 128
+	logoSize     = 64
+)
+
+// imageTimeout bounds all of one strip's image fetches together, which run
+// concurrently, so a slow image server delays a card by about this much and
+// the strip then draws blank tiles.
+const imageTimeout = 3 * time.Second
+
+// affiliationTimeout bounds all of one kill's affiliation lookups together,
+// which run concurrently, so a cold kill waits about one lookup at most.
+const affiliationTimeout = universe.DefaultTimeout
+
 // Relay is the pipeline. The zero value is not usable; call [New].
 type Relay struct {
 	poster   Poster
@@ -110,16 +164,26 @@ type Relay struct {
 	store    Store
 	topology Topology
 	aliases  Aliases
+	style    discord.CardStyle
+	affils   Affiliations
+	images   Images
+	lastKill LastKill
 
 	friendlies killmail.Friendlies
 	filters    killmail.Filters
 	logger     *slog.Logger
 	fatalPost  func(error) bool
+	// drawStrip is cardimage.Strip, replaced in tests to make it fail.
+	drawStrip func(cardimage.StripInput) ([]byte, error)
 }
 
 type options struct {
 	topology   Topology
 	aliases    Aliases
+	style      discord.CardStyle
+	affils     Affiliations
+	images     Images
+	lastKill   LastKill
 	friendlies killmail.Friendlies
 	filters    killmail.Filters
 	logger     *slog.Logger
@@ -151,6 +215,31 @@ func WithTopology(t Topology) Option {
 // up. Without one, or with a nil one, no embed shows an alias.
 func WithAliases(a Aliases) Option {
 	return func(o *options) { o.aliases = a }
+}
+
+// WithCardStyle sets the layout every kill card is rendered in. Without it,
+// cards use [discord.CardStyleBlock].
+func WithCardStyle(s discord.CardStyle) Option {
+	return func(o *options) { o.style = s }
+}
+
+// WithAffiliations sets where the corporation and alliance names and tickers a
+// payload left out are looked up. Without one, or with a nil one, an embed
+// shows only the names the payload carried.
+func WithAffiliations(a Affiliations) Option {
+	return func(o *options) { o.affils = a }
+}
+
+// WithImages sets where the strip card style's portraits and logos are
+// fetched. Without one, or with a nil one, a strip draws every tile blank.
+func WithImages(i Images) Option {
+	return func(o *options) { o.images = i }
+}
+
+// WithLastKill sets where every posted kill is saved for [Relay.Replay].
+// Without one, or with a nil one, nothing is saved.
+func WithLastKill(l LastKill) Option {
+	return func(o *options) { o.lastKill = l }
 }
 
 // WithLogger sets the logger the pipeline reports on. A nil logger keeps
@@ -185,7 +274,7 @@ func New(poster Poster, resolver Resolver, store Store, opts ...Option) (*Relay,
 		return nil, errors.New("relay: a state store is required")
 	}
 
-	o := options{logger: slog.Default(), fatalPost: IsFatalPost}
+	o := options{style: discord.CardStyleBlock, logger: slog.Default(), fatalPost: IsFatalPost}
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -196,10 +285,15 @@ func New(poster Poster, resolver Resolver, store Store, opts ...Option) (*Relay,
 		store:      store,
 		topology:   o.topology,
 		aliases:    o.aliases,
+		style:      o.style,
+		affils:     o.affils,
+		images:     o.images,
+		lastKill:   o.lastKill,
 		friendlies: o.friendlies,
 		filters:    o.filters,
 		logger:     o.logger,
 		fatalPost:  o.fatalPost,
+		drawStrip:  cardimage.Strip,
 	}, nil
 }
 
@@ -224,7 +318,7 @@ func (r *Relay) Handle(ctx context.Context, env wanderer.Envelope) error {
 	switch env.Type {
 	case killmail.EventMapKill:
 		for _, k := range killmail.Extract(env.Payload, r.logger) {
-			if err := r.handle(ctx, k); err != nil {
+			if err := r.handle(ctx, k, env.Payload); err != nil {
 				return err
 			}
 		}
@@ -244,8 +338,9 @@ func (r *Relay) Handle(ctx context.Context, env wanderer.Envelope) error {
 	return nil
 }
 
-// handle runs one killmail through dedupe, the filters and Discord.
-func (r *Relay) handle(ctx context.Context, k killmail.Killmail) error {
+// handle runs one killmail through dedupe, the filters and Discord. payload is
+// the event payload k was decoded from, which is saved with it once posted.
+func (r *Relay) handle(ctx context.Context, k killmail.Killmail, payload json.RawMessage) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -261,9 +356,10 @@ func (r *Relay) handle(ctx context.Context, k killmail.Killmail) error {
 		return nil
 	}
 
-	name := r.resolver.Name(ctx, k.SolarSystemID)
-	alias := r.alias(k.SolarSystemID)
-	if err := r.poster.Post(ctx, discord.Render(k, class, name, alias)); err != nil {
+	// Classification and the filters above judged the payload alone; the
+	// names filled in here are display text only.
+	msg, name, alias := r.card(ctx, k, class)
+	if err := r.poster.Post(ctx, msg); err != nil {
 		switch {
 		case ctx.Err() != nil:
 			// A post torn down by shutdown is not a post Discord refused, and
@@ -283,12 +379,175 @@ func (r *Relay) handle(ctx context.Context, k killmail.Killmail) error {
 
 	// Only now, with Discord's acceptance in hand, is the kill a duplicate.
 	r.store.MarkPosted(k.ID)
+	if r.lastKill != nil {
+		r.lastKill.Save(k.ID, payload)
+	}
 	attrs := []any{"killmail_id", k.ID, "classification", string(class), "solar_system", name}
 	if alias != "" {
 		attrs = append(attrs, "chain_alias", alias)
 	}
 	r.logger.Info("posted killmail", attrs...)
 	return nil
+}
+
+// Replay posts killmail id from payload, a saved kill's (see [LastKill]),
+// once more: classified, enriched, named and rendered in the configured style
+// as a live kill is, but past the dedupe and the filters, and without marking
+// it posted, saving it or touching the cursor. It is for showing what a build
+// makes of a known kill in a test channel.
+//
+// It returns an error when payload holds no killmail id, or when the post
+// fails.
+func (r *Relay) Replay(ctx context.Context, id int64, payload json.RawMessage) error {
+	for _, k := range killmail.Extract(payload, r.logger) {
+		if k.ID != id {
+			continue
+		}
+		class := r.friendlies.Classify(k)
+		msg, name, alias := r.card(ctx, k, class)
+		if err := r.poster.Post(ctx, msg); err != nil {
+			return fmt.Errorf("relay: replaying killmail %d: %w", id, err)
+		}
+		attrs := []any{"killmail_id", k.ID, "classification", string(class), "solar_system", name}
+		if alias != "" {
+			attrs = append(attrs, "chain_alias", alias)
+		}
+		r.logger.Info("replayed killmail", attrs...)
+		return nil
+	}
+	return fmt.Errorf("relay: the saved payload holds no killmail %d", id)
+}
+
+// card fills in k's missing names, resolves its system name and chain alias,
+// and builds its card, returning the name and alias for the log line.
+func (r *Relay) card(ctx context.Context, k killmail.Killmail, class killmail.Classification) (discord.Message, string, string) {
+	r.enrich(ctx, &k)
+	name := r.resolver.Name(ctx, k.SolarSystemID)
+	alias := r.alias(k.SolarSystemID)
+	return r.message(ctx, k, class, name, alias), name, alias
+}
+
+// message builds the card for one kill in the configured style.
+func (r *Relay) message(ctx context.Context, k killmail.Killmail, class killmail.Classification, name, alias string) discord.Message {
+	switch r.style {
+	case discord.CardStyleComponents:
+		return discord.ComponentsMessage(k, class, name, alias)
+	case discord.CardStyleStrip:
+		png, err := r.drawStrip(r.stripInput(ctx, k))
+		if err != nil {
+			// The strip is decoration: the card says everything it does.
+			r.logger.Warn("posting the card without its strip", "killmail_id", k.ID, "error", err)
+			png = nil
+		}
+		return discord.StripMessage(k, class, name, alias, png)
+	default:
+		return discord.Message{Embed: discord.Render(k, class, name, alias, r.style)}
+	}
+}
+
+// Text fallbacks for the strip, matching the cards' own.
+const (
+	unknownPilot = "Unknown pilot"
+	unknownShip  = "Unknown ship"
+)
+
+// stripInput is what the strip draws for k: each party's text, with the
+// fallbacks applied, and their portrait and logos, fetched concurrently under
+// one context bounded by imageTimeout. Only IDs the payload gives are fetched;
+// a missing or failed image is nil, a blank tile.
+func (r *Relay) stripInput(ctx context.Context, k killmail.Killmail) cardimage.StripInput {
+	in := cardimage.StripInput{
+		Victim: cardimage.Party{
+			Name: orElse(orElse(k.Victim.CharName, k.Victim.CorpName), unknownPilot),
+			Hull: orElse(k.Victim.ShipName, unknownShip),
+		},
+		Attacker: cardimage.Party{
+			// A final blow without a character is an NPC, named by its ship.
+			Name: orElse(k.FinalBlow.CharName, k.FinalBlow.ShipName),
+			Hull: orElse(k.FinalBlow.ShipName, unknownShip),
+		},
+	}
+	if r.images == nil {
+		return in
+	}
+	ctx, cancel := context.WithTimeout(ctx, imageTimeout)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	fetch := func(url string, dst *image.Image) {
+		if url == "" {
+			return
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if img, ok := r.images.Fetch(ctx, url); ok {
+				*dst = img
+			}
+		}()
+	}
+	for _, side := range []struct {
+		p   killmail.Party
+		dst *cardimage.Party
+	}{{k.Victim, &in.Victim}, {k.FinalBlow, &in.Attacker}} {
+		fetch(r.images.CharacterPortrait(side.p.CharID, portraitSize), &side.dst.Portrait)
+		fetch(r.images.CorporationLogo(side.p.CorpID, logoSize), &side.dst.Corp)
+		fetch(r.images.AllianceLogo(side.p.AllianceID, logoSize), &side.dst.Alliance)
+	}
+	wg.Wait()
+	return in
+}
+
+// orElse returns s, or fallback when s is empty.
+func orElse(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
+}
+
+// enrich fills in the character names and the corporation and alliance names
+// and tickers that the victim and the final blow carry an ID for but no name or
+// ticker, without an
+// [Affiliations] doing nothing. Only empty fields are filled, and only IDs the
+// payload gives are looked up: an AllianceID of 0 means the pilot had no
+// alliance at kill time, and stays that way. The lookups run concurrently
+// under one context bounded by affiliationTimeout; one that fails leaves its
+// fields empty.
+func (r *Relay) enrich(ctx context.Context, k *killmail.Killmail) {
+	if r.affils == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, affiliationTimeout)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	// A nil ticker is a character's: it has none to fill.
+	fill := func(lookup func(context.Context, int64) (universe.Entity, bool), id int64, name, ticker *string) {
+		if id <= 0 || (*name != "" && (ticker == nil || *ticker != "")) {
+			return
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			e, ok := lookup(ctx, id)
+			if !ok {
+				return
+			}
+			if *name == "" {
+				*name = e.Name
+			}
+			if ticker != nil && *ticker == "" {
+				*ticker = e.Ticker
+			}
+		}()
+	}
+	for _, p := range []*killmail.Party{&k.Victim, &k.FinalBlow} {
+		fill(r.affils.Character, p.CharID, &p.CharName, nil)
+		fill(r.affils.Corporation, p.CorpID, &p.CorpName, &p.CorpTicker)
+		fill(r.affils.Alliance, p.AllianceID, &p.AllianceName, &p.AllianceTicker)
+	}
+	wg.Wait()
 }
 
 // alias is the chain alias of a solar system, or "" without an [Aliases].

@@ -230,7 +230,7 @@ func checkWritable(dir string) error {
 // has to be the directory holding path so that the rename stays within one
 // filesystem.
 func writeFileAtomic(dir, path string, data []byte) error {
-	f, err := os.CreateTemp(dir, FileName+".tmp-*")
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("state: creating temporary file in %s: %w", dir, err)
 	}

@@ -1,0 +1,34 @@
+[
+  {
+    "type": 17,
+    "components": [
+      {
+        "type": 9,
+        "components": [
+          {
+            "type": 10,
+            "content": "### [Stratios — Pilot A](https://zkillboard.com/kill/123456789/)"
+          }
+        ],
+        "accessory": {
+          "type": 11,
+          "media": {
+            "url": "https://images.evetech.net/types/33470/render?size=128"
+          }
+        }
+      },
+      {
+        "type": 10,
+        "content": "```\nSystem  J123456\n```"
+      },
+      {
+        "type": 14
+      },
+      {
+        "type": 10,
+        "content": "-# Kill · \u003ct:1792003327:f\u003e"
+      }
+    ],
+    "accent_color": 3066993
+  }
+]
