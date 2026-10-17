@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -96,18 +97,18 @@ func TestRelayPostsFiltersAndResumes(t *testing.T) {
 		t.Fatalf("Discord received %d posts, want 1 (the NPC kill is filtered); logs:\n%s", len(posts), logs)
 	}
 	if want := fmt.Sprintf("https://zkillboard.com/kill/%d/", postedKillID); posts[0].URL != want {
-		t.Errorf("posted embed URL = %q, want %q", posts[0].URL, want)
+		t.Errorf("posted card URL = %q, want %q", posts[0].URL, want)
 	}
 	if want := discord.ColorLoss; posts[0].Color != want {
-		t.Errorf("posted embed color = %#x, want %#x: the victim corp is configured as friendly", posts[0].Color, want)
+		t.Errorf("posted card color = %#x, want %#x: the victim corp is configured as friendly", posts[0].Color, want)
 	}
 	if !hasSystemRow(posts[0], testSystemName) {
-		t.Errorf("posted embed has no System row naming %q:\n%s", testSystemName, posts[0].Description)
+		t.Errorf("posted card has no System row naming %q:\n%s", testSystemName, posts[0].Text)
 	}
 	// strip is the default style, and the strip goes out with blank tiles
 	// when the image server has nothing.
-	if posts[0].Image == nil || posts[0].Image.URL != "attachment://kill.png" {
-		t.Errorf("posted embed image = %+v, want the strip, attachment://kill.png", posts[0].Image)
+	if posts[0].Image != "attachment://kill.png" {
+		t.Errorf("posted card image = %q, want the strip, attachment://kill.png", posts[0].Image)
 	}
 
 	// The state is what makes the restart below safe: the cursor to resume
@@ -224,7 +225,7 @@ func TestRelayFiltersToTheHomeChain(t *testing.T) {
 		t.Fatalf("Discord received %d posts, want 1 (only the kill in the linked system); logs:\n%s", len(posts), logs)
 	}
 	if want := fmt.Sprintf("https://zkillboard.com/kill/%d/", linkedKillID); posts[0].URL != want {
-		t.Errorf("posted embed URL = %q, want %q", posts[0].URL, want)
+		t.Errorf("posted card URL = %q, want %q", posts[0].URL, want)
 	}
 	for _, id := range []int64{islandKillID, cutOffKillID} {
 		assertLogged(t, logs.String(), map[string]any{
@@ -305,7 +306,7 @@ func TestRelayShowsTheChainAlias(t *testing.T) {
 			}
 			for i, want := range []string{testSystemName + " (HOTEL)", testSystemName + " (INDIA)"} {
 				if !hasSystemRow(posts[i], want) {
-					t.Errorf("post %d has no System row %q:\n%s", i, want, posts[i].Description)
+					t.Errorf("post %d has no System row %q:\n%s", i, want, posts[i].Text)
 				}
 			}
 			assertLogged(t, logs.String(), map[string]any{
@@ -622,10 +623,10 @@ func equalIDs(got, want []int64) bool {
 	return true
 }
 
-// hasSystemRow reports whether the System row of the embed's monospace block
+// hasSystemRow reports whether the System row of the card's monospace block
 // reads value.
-func hasSystemRow(embed *discordgo.MessageEmbed, value string) bool {
-	return strings.Contains(embed.Description, "\nSystem     "+value+"\n")
+func hasSystemRow(p post, value string) bool {
+	return strings.Contains(p.Text, "\nSystem     "+value+"\n")
 }
 
 // assertJSONLogs checks that every line of the log is one JSON object, which
@@ -912,7 +913,7 @@ type fakeDiscord struct {
 	gatewayURL string
 
 	mu    sync.Mutex
-	posts []*discordgo.MessageEmbed
+	posts []post
 	conns []net.Conn
 }
 
@@ -984,11 +985,55 @@ func (f *fakeDiscord) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handlePost accepts one message, recording the embed it carried. A message
+// A post is a card the fake accepted, read the same way whether it came as an
+// embed or as a Components V2 container: the zKillboard link, the colour, the
+// text, and the attachment its image shows.
+type post struct {
+	URL   string
+	Color int
+	Text  string
+	Image string
+}
+
+var zkillLink = regexp.MustCompile(`https://zkillboard\.com/kill/[0-9]+/`)
+
+// readPost reads an embed's card, or else a components container's.
+func readPost(embeds []*discordgo.MessageEmbed, components []discord.Component) (post, bool) {
+	if len(embeds) == 1 {
+		e := embeds[0]
+		p := post{URL: e.URL, Color: e.Color, Text: e.Description}
+		if e.Image != nil {
+			p.Image = e.Image.URL
+		}
+		return p, true
+	}
+	if len(components) != 1 || components[0].Type != discord.ComponentContainer || components[0].AccentColor == nil {
+		return post{}, false
+	}
+	p := post{Color: *components[0].AccentColor}
+	var walk func([]discord.Component)
+	walk = func(cs []discord.Component) {
+		for _, c := range cs {
+			if c.Type == discord.ComponentTextDisplay {
+				p.Text += c.Content + "\n"
+			}
+			for _, item := range c.Items {
+				p.Image = item.Media.URL
+			}
+			walk(c.Components)
+		}
+	}
+	walk(components[0].Components)
+	p.URL = zkillLink.FindString(p.Text)
+	return p, true
+}
+
+// handlePost accepts one message, recording the card it carried. A message
 // with files, the strip card's, is multipart with its JSON in payload_json.
 func (f *fakeDiscord) handlePost(w http.ResponseWriter, r *http.Request) {
 	var sent struct {
-		Embeds []*discordgo.MessageEmbed `json:"embeds"`
+		Embeds     []*discordgo.MessageEmbed `json:"embeds"`
+		Components []discord.Component       `json:"components"`
 	}
 	var body io.Reader = r.Body
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
@@ -1002,17 +1047,22 @@ func (f *fakeDiscord) handlePost(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "undecodable body"})
 		return
 	}
+	card, ok := readPost(sent.Embeds, sent.Components)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "neither an embed nor a container"})
+		return
+	}
 	f.mu.Lock()
-	f.posts = append(f.posts, sent.Embeds...)
+	f.posts = append(f.posts, card)
 	f.mu.Unlock()
 	writeJSON(w, http.StatusCreated, &discordgo.Message{ID: "999", ChannelID: testChannelID, Embeds: sent.Embeds})
 }
 
-// posted returns the embeds the fake accepted, in order.
-func (f *fakeDiscord) posted() []*discordgo.MessageEmbed {
+// posted returns the cards the fake accepted, in order.
+func (f *fakeDiscord) posted() []post {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]*discordgo.MessageEmbed(nil), f.posts...)
+	return append([]post(nil), f.posts...)
 }
 
 // websocketGUID is the constant a websocket handshake's accept header is

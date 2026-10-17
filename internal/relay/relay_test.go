@@ -10,6 +10,7 @@ import (
 	"image/png"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -55,21 +56,31 @@ func (p *fakePoster) Post(_ context.Context, msg discord.Message) error {
 	return nil
 }
 
-// ids reads the killmail IDs back out of the embeds the poster accepted, so a
-// test can assert on what was posted without reaching into the embed layout.
+// ids reads the killmail IDs back out of the cards the poster accepted, from
+// the zKillboard link an embed carries as its URL and a components card in its
+// header, so a test can assert on what was posted without reaching further
+// into the card layout.
 func (p *fakePoster) ids(t *testing.T) []int64 {
 	t.Helper()
-	ids := make([]int64, 0, len(p.embeds))
-	for _, embed := range p.embeds {
-		path := strings.Trim(strings.TrimPrefix(embed.URL, "https://zkillboard.com/kill/"), "/")
+	ids := make([]int64, 0, len(p.messages))
+	for _, msg := range p.messages {
+		var link string
+		if msg.Embed != nil {
+			link = msg.Embed.URL
+		} else if m := zkillLink.FindString(fmt.Sprint(msg.Components)); m != "" {
+			link = m
+		}
+		path := strings.Trim(strings.TrimPrefix(link, "https://zkillboard.com/kill/"), "/")
 		id, err := strconv.ParseInt(path, 10, 64)
 		if err != nil {
-			t.Fatalf("embed URL %q does not name a killmail ID: %v", embed.URL, err)
+			t.Fatalf("card link %q does not name a killmail ID: %v", link, err)
 		}
 		ids = append(ids, id)
 	}
 	return ids
 }
+
+var zkillLink = regexp.MustCompile(`https://zkillboard\.com/kill/[0-9]+/`)
 
 // fakeResolver answers from a fixed table, falling back the way
 // internal/universe does.
@@ -1005,15 +1016,21 @@ var partyIDs = map[string]any{
 	"final_blow_alliance_id": 0,
 }
 
-// wantStrip checks that msg is the strip card: the block embed showing a PNG
-// attached as kill.png.
+// wantStrip checks that msg is the strip card: a components card whose
+// gallery shows a PNG attached as kill.png.
 func wantStrip(t *testing.T, msg discord.Message) {
 	t.Helper()
-	if msg.Embed == nil || msg.Embed.Description == "" {
-		t.Fatalf("strip card embed = %+v, want the block embed", msg.Embed)
+	if msg.Embed != nil || len(msg.Components) != 1 {
+		t.Fatalf("strip card = embed %+v, %d components; want one container", msg.Embed, len(msg.Components))
 	}
-	if msg.Embed.Image == nil || msg.Embed.Image.URL != "attachment://kill.png" {
-		t.Errorf("strip card image = %+v, want attachment://kill.png", msg.Embed.Image)
+	gallery := false
+	for _, c := range msg.Components[0].Components {
+		if c.Type == discord.ComponentMediaGallery && len(c.Items) == 1 && c.Items[0].Media.URL == "attachment://kill.png" {
+			gallery = true
+		}
+	}
+	if !gallery {
+		t.Errorf("strip card has no gallery showing attachment://kill.png: %+v", msg.Components[0])
 	}
 	if len(msg.Files) != 1 || msg.Files[0].Name != "kill.png" {
 		t.Fatalf("strip card files = %+v, want kill.png alone", msg.Files)
@@ -1063,7 +1080,7 @@ func TestHandlePostsTheStripWithoutImages(t *testing.T) {
 	wantStrip(t, f.poster.messages[0])
 }
 
-func TestHandleFallsBackToTheBlockCardWhenTheStripFails(t *testing.T) {
+func TestHandlePostsTheCardWithoutAStripWhenTheStripFails(t *testing.T) {
 	f := newFixture(t, WithCardStyle(discord.CardStyleStrip), WithImages(&fakeImages{}))
 	f.relay.drawStrip = func(cardimage.StripInput) ([]byte, error) { return nil, errors.New("no fonts") }
 
@@ -1071,8 +1088,9 @@ func TestHandleFallsBackToTheBlockCardWhenTheStripFails(t *testing.T) {
 
 	wantPosted(t, f, 1)
 	msg := f.poster.messages[0]
-	if msg.Embed.Description == "" || msg.Embed.Image != nil || len(msg.Files) != 0 {
-		t.Errorf("fallback card = embed %+v, %d files; want the block embed with no image or files", msg.Embed, len(msg.Files))
+	if msg.Embed != nil || len(msg.Components) != 1 || len(msg.Files) != 0 {
+		t.Errorf("fallback card = embed %+v, %d components, %d files; want the components card with no files",
+			msg.Embed, len(msg.Components), len(msg.Files))
 	}
 	if !strings.Contains(f.logs.String(), "level=WARN") || !strings.Contains(f.logs.String(), "no fonts") {
 		t.Errorf("logs do not warn about the strip:\n%s", f.logs)

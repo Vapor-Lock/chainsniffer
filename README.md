@@ -15,13 +15,13 @@ One process serves one map and one channel.
 
 Each killmail becomes a card, in one of four styles chosen by `CHAINSNIFFER_CARD_STYLE`:
 
-- **`strip`**, the default: the `block` card with a picture under it, a dark strip showing the
-  victim on the left and the final blow on the right, each with their portrait, their corporation
+- **`strip`**, the default: the `components` card with a picture in place of its two party
+  sections, a dark strip showing the victim on the left and the final blow on the right, each with their portrait, their corporation
   and alliance logos at the outer edge, and their name above their hull. chainsniffer draws the
   strip itself from the [EVE image server](https://images.evetech.net) and uploads it with the
   card, so this style needs the **Attach Files** permission. An image that cannot be fetched within
   a few seconds is left as a blank tile, and a strip that cannot be drawn at all is logged and the
-  card goes out as a plain `block` card.
+  card goes out without it.
 - **`block`** sets the details in an aligned monospace block and gives every card the same width.
 - **`fields`** shows them as Discord inline fields instead, the layout chainsniffer used before the
   block; its cards are as wide as their content.
@@ -30,8 +30,9 @@ Each killmail becomes a card, in one of four styles chosen by `CHAINSNIFFER_CARD
   their name, hull and tickers beside their alliance logo (else corporation logo, else portrait),
   and the kill time in the reader's own time zone. Discord fetches its images itself.
 
-The three embed styles, `strip`, `block` and `fields`, share the title, thumbnail, color, footer and
-timestamp:
+The two embed styles, `block` and `fields`, share the title, thumbnail, color, footer and
+timestamp; the `strip` and `components` cards share the same title, ship render, colour and
+`block` details, with a footer line of their own:
 
 - **Title:** `<victim ship> — <victim name | corp name>`, linked to the kill on zKillboard.
 - **Thumbnail:** a render of the victim's ship.

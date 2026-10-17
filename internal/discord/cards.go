@@ -5,7 +5,6 @@ import (
 	"strconv"
 
 	"github.com/Vapor-Lock/chainsniffer/internal/killmail"
-	"github.com/bwmarrin/discordgo"
 )
 
 // The EVE image server's portraits and logos, which the components card shows
@@ -16,23 +15,12 @@ const (
 	allianceLogoURL    = "https://images.evetech.net/alliances/%d/logo?size=128"
 )
 
-// The strip style's attachment: the PNG cardimage draws, which the embed shows
-// as its image under the monospace block.
+// The strip style's attachment: the PNG cardimage draws, which the card shows
+// in a media gallery under the monospace block.
 const (
 	stripFileName    = "kill.png"
 	stripContentType = "image/png"
 )
-
-// StripMessage returns the strip style's card: embed, the block style's card,
-// showing png as its image. It sets embed's image to the attachment, so the
-// embed is the message's and the caller should not reuse it.
-func StripMessage(embed *discordgo.MessageEmbed, png []byte) Message {
-	embed.Image = &discordgo.MessageEmbedImage{URL: "attachment://" + stripFileName}
-	return Message{
-		Embed: embed,
-		Files: []File{{Name: stripFileName, ContentType: stripContentType, Data: png}},
-	}
-}
 
 // ComponentsMessage returns the components style's card, a Components V2
 // layout in one container of the classification colour: the title linked to
@@ -45,6 +33,31 @@ func StripMessage(embed *discordgo.MessageEmbed, png []byte) Message {
 // not its text's. Like Render, ComponentsMessage is a pure function, and every
 // part the payload gave nothing for is left out.
 func ComponentsMessage(k killmail.Killmail, c killmail.Classification, systemName, alias string) Message {
+	return Message{Components: []Component{card(k, c, systemName, alias,
+		Separator(),
+		party(victimName(k.Victim), k.Victim),
+		party(orElse(k.FinalBlow.CharName, k.FinalBlow.ShipName), k.FinalBlow),
+	)}}
+}
+
+// StripMessage returns the strip style's card: the components card with png,
+// the portrait strip, in a media gallery where the components style has its
+// victim and final-blow sections, since the strip shows both parties. It
+// uploads png with the message. A nil png, a strip that could not be drawn,
+// leaves the gallery out and posts the rest.
+func StripMessage(k killmail.Killmail, c killmail.Classification, systemName, alias string, png []byte) Message {
+	if png == nil {
+		return Message{Components: []Component{card(k, c, systemName, alias)}}
+	}
+	return Message{
+		Components: []Component{card(k, c, systemName, alias, MediaGallery("attachment://"+stripFileName))},
+		Files:      []File{{Name: stripFileName, ContentType: stripContentType, Data: png}},
+	}
+}
+
+// card is the container the components and strip styles share: the header,
+// the monospace block, middle, and the footer.
+func card(k killmail.Killmail, c killmail.Classification, systemName, alias string, middle ...Component) Component {
 	header := TextDisplay("### [" + markdownEscaper.Replace(title(k.Victim)) + "](" + fmt.Sprintf(killURL, k.ID) + ")")
 	if k.Victim.ShipTypeID > 0 {
 		header = Section(Thumbnail(fmt.Sprintf(shipRenderURL, k.Victim.ShipTypeID)), header)
@@ -54,15 +67,11 @@ func ComponentsMessage(k killmail.Killmail, c killmail.Classification, systemNam
 	if b := block(rows(k, system(systemName, alias))); b != "" {
 		children = append(children, TextDisplay(b))
 	}
-	children = append(children,
-		Separator(),
-		party(victimName(k.Victim), k.Victim),
-		party(orElse(k.FinalBlow.CharName, k.FinalBlow.ShipName), k.FinalBlow),
-	)
+	children = append(children, middle...)
 	if text := componentsFooter(c, k); text != "" {
 		children = append(children, TextDisplay(text))
 	}
-	return Message{Components: []Component{Container(color(c), children...)}}
+	return Container(color(c), children...)
 }
 
 // victimName is who title names: the character, else the owning corporation

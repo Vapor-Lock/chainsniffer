@@ -376,14 +376,13 @@ func (r *Relay) message(ctx context.Context, k killmail.Killmail, class killmail
 	case discord.CardStyleComponents:
 		return discord.ComponentsMessage(k, class, name, alias)
 	case discord.CardStyleStrip:
-		embed := discord.Render(k, class, name, alias, discord.CardStyleBlock)
 		png, err := r.drawStrip(r.stripInput(ctx, k))
 		if err != nil {
-			// The strip is decoration: the block card says everything it does.
-			r.logger.Warn("posting the block card without its strip", "killmail_id", k.ID, "error", err)
-			return discord.Message{Embed: embed}
+			// The strip is decoration: the card says everything it does.
+			r.logger.Warn("posting the card without its strip", "killmail_id", k.ID, "error", err)
+			png = nil
 		}
-		return discord.StripMessage(embed, png)
+		return discord.StripMessage(k, class, name, alias, png)
 	default:
 		return discord.Message{Embed: discord.Render(k, class, name, alias, r.style)}
 	}

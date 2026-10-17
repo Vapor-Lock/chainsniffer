@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -169,17 +170,27 @@ func TestComponentsMessageNameFallbacks(t *testing.T) {
 
 func TestStripMessage(t *testing.T) {
 	png := []byte("\x89PNG fake")
-	embed := discord.Render(typicalKill(t), killmail.Kill, "J123456", "", discord.CardStyleBlock)
-	msg := discord.StripMessage(embed, png)
+	k := typicalKill(t)
+	msg := discord.StripMessage(k, killmail.Kill, "J123456", "", png)
 
-	if msg.Embed != embed {
-		t.Errorf("Embed = %p, want the block embed %p", msg.Embed, embed)
+	if msg.Embed != nil {
+		t.Errorf("Embed = %+v, want none", msg.Embed)
 	}
-	if embed.Image == nil || embed.Image.URL != "attachment://kill.png" {
-		t.Errorf("embed image = %+v, want attachment://kill.png", embed.Image)
+	// The components card's header, block and footer, with the gallery where
+	// its party sections would be.
+	children := componentsChildren(t, msg)
+	want := componentsChildren(t, discord.ComponentsMessage(k, killmail.Kill, "J123456", ""))
+	if len(children) != 4 {
+		t.Fatalf("children = %+v, want header, block, gallery and footer", children)
 	}
-	if len(msg.Components) != 0 {
-		t.Errorf("Components = %+v, want none", msg.Components)
+	for _, i := range [][2]int{{0, 0}, {1, 1}, {3, 5}} {
+		if !reflect.DeepEqual(children[i[0]], want[i[1]]) {
+			t.Errorf("child %d = %+v, want the components card's %+v", i[0], children[i[0]], want[i[1]])
+		}
+	}
+	gallery := children[2]
+	if gallery.Type != discord.ComponentMediaGallery || len(gallery.Items) != 1 || gallery.Items[0].Media.URL != "attachment://kill.png" {
+		t.Errorf("gallery = %+v, want one item showing attachment://kill.png", gallery)
 	}
 	if len(msg.Files) != 1 {
 		t.Fatalf("Files = %+v, want the one PNG", msg.Files)
@@ -187,5 +198,19 @@ func TestStripMessage(t *testing.T) {
 	f := msg.Files[0]
 	if f.Name != "kill.png" || f.ContentType != "image/png" || !bytes.Equal(f.Data, png) {
 		t.Errorf("file = %s %s %q, want kill.png image/png %q", f.Name, f.ContentType, f.Data, png)
+	}
+}
+
+// Without a strip the card posts without a gallery or a file.
+func TestStripMessageWithoutTheStrip(t *testing.T) {
+	msg := discord.StripMessage(typicalKill(t), killmail.Kill, "J123456", "", nil)
+
+	if len(msg.Files) != 0 {
+		t.Errorf("Files = %+v, want none", msg.Files)
+	}
+	for _, c := range componentsChildren(t, msg) {
+		if c.Type == discord.ComponentMediaGallery {
+			t.Errorf("card has a gallery without a strip: %+v", c)
+		}
 	}
 }

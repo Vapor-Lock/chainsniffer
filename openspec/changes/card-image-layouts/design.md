@@ -81,7 +81,18 @@ marshalled as is, and golden-tested.
   fetches the six images concurrently under one context bounded by about 3 seconds, calls
   `cardimage.Strip`, and passes the PNG to `discord.StripMessage(embed, png)`. That function sets
   `embed.Image.URL = "attachment://kill.png"` and attaches the file.
-  - A strip that fails to draw is logged at warn, and the card goes out as the plain `block` embed.
+  - A strip that fails to draw is logged at warn, and the card goes out without its gallery.
+
+**The strip card became a components card in the live check.** Posted side by side, the `strip`
+embed's footer ("Kill • Today at 4:08 PM", the embed timestamp Discord draws) did not match the
+`components` card's footer line ("Kill · October 17, 2026 4:08 PM", a `<t:…:f>` tag). An embed
+footer is plain text, so it cannot carry the tag. The strip card is now the `components` card
+with a media gallery showing `attachment://kill.png` where the components card has its two party
+sections, which the strip already shows: `discord.StripMessage(k, class, system, alias, png)`
+builds it on the same container, and a nil PNG leaves the gallery out. `discord.Message` allows
+files beside components, which `Post` uploads as one multipart body (`MultipartBodyWithJSON` and
+`RequestRaw`, since discordgo has no call taking both). The `block` card the strip used to carry
+is unchanged for the `block` style.
 
 **Strip geometry** (constants, retuned in the live check):
 - **Canvas:** 1024 × 136 px on a dark rounded panel (`#2B2D31`).

@@ -164,8 +164,8 @@ func New(token, channelID string, opts ...Option) (*Poster, error) {
 // ChannelID is the channel the Poster posts to.
 func (p *Poster) ChannelID() string { return p.channelID }
 
-// Post sends msg to the configured channel as a single message: an embed with
-// its files, or a Components V2 layout.
+// Post sends msg to the configured channel as a single message: an embed or a
+// Components V2 layout, with its files.
 //
 // Rate limits are discordgo's business: it waits out a 429's retry_after and
 // resends the same message. Post adds a retry budget for the failures
@@ -221,7 +221,17 @@ func (p *Poster) send(ctx context.Context, msg Message) error {
 	endpoint := discordgo.EndpointChannelMessages(p.channelID)
 	if len(msg.Components) > 0 {
 		body := componentsBody{Flags: flagComponentsV2, Components: msg.Components}
-		_, err := p.session.RequestWithBucketID(http.MethodPost, endpoint, body, endpoint, discordgo.WithContext(ctx))
+		if len(msg.Files) == 0 {
+			_, err := p.session.RequestWithBucketID(http.MethodPost, endpoint, body, endpoint, discordgo.WithContext(ctx))
+			return err
+		}
+		// Files go up as a multipart body beside the JSON, as discordgo does
+		// for an embed's; it has no call that takes components and files.
+		contentType, data, err := discordgo.MultipartBodyWithJSON(body, msg.files())
+		if err != nil {
+			return err
+		}
+		_, err = p.session.RequestRaw(http.MethodPost, endpoint, contentType, data, endpoint, 0, discordgo.WithContext(ctx))
 		return err
 	}
 	_, err := p.session.ChannelMessageSendComplex(p.channelID, msg.send(), discordgo.WithContext(ctx))

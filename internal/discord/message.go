@@ -11,16 +11,16 @@ import (
 // is laid out by its components alone: it cannot also carry content or embeds.
 const flagComponentsV2 = 1 << 15
 
-// A Message is one card as Post sends it: either an embed, optionally with
-// files attached to it, or a Components V2 layout.
+// A Message is one card as Post sends it: either an embed or a Components V2
+// layout, optionally with files attached.
 type Message struct {
-	// Embed is the card of the block, fields and strip styles.
+	// Embed is the card of the block and fields styles.
 	Embed *discordgo.MessageEmbed
-	// Files are uploaded with Embed, which refers to them as
-	// "attachment://<Name>". The strip style attaches its PNG here.
+	// Files are uploaded with the message, whose embed or components refer
+	// to them as "attachment://<Name>". The strip style attaches its PNG here.
 	Files []File
-	// Components is the card of the components style, sent as a Components V2
-	// message. It excludes Embed and Files.
+	// Components is the card of the components and strip styles, sent as a
+	// Components V2 message. It excludes Embed.
 	Components []Component
 }
 
@@ -38,24 +38,26 @@ func (m Message) validate() error {
 		return errors.New("message has neither an embed nor components")
 	case m.Embed != nil && len(m.Components) > 0:
 		return errors.New("a components message cannot also carry an embed")
-	case len(m.Components) > 0 && len(m.Files) > 0:
-		return errors.New("a components message cannot carry files")
 	}
 	return nil
 }
 
-// send returns the embed message's ChannelMessageSendComplex payload. Each
-// call wraps every file in a fresh reader, so a retry uploads it whole again.
+// send returns the embed message's ChannelMessageSendComplex payload.
 func (m Message) send() *discordgo.MessageSend {
-	data := &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{m.Embed}}
+	return &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{m.Embed}, Files: m.files()}
+}
+
+// files wraps every file in a fresh reader, so a retry uploads it whole again.
+func (m Message) files() []*discordgo.File {
+	var out []*discordgo.File
 	for _, f := range m.Files {
-		data.Files = append(data.Files, &discordgo.File{
+		out = append(out, &discordgo.File{
 			Name:        f.Name,
 			ContentType: f.ContentType,
 			Reader:      bytes.NewReader(f.Data),
 		})
 	}
-	return data
+	return out
 }
 
 // componentsBody is the JSON body of a Components V2 message.
@@ -66,11 +68,12 @@ type componentsBody struct {
 
 // Component types of Discord's Components V2 layout.
 const (
-	ComponentSection     = 9
-	ComponentTextDisplay = 10
-	ComponentThumbnail   = 11
-	ComponentSeparator   = 14
-	ComponentContainer   = 17
+	ComponentSection      = 9
+	ComponentTextDisplay  = 10
+	ComponentThumbnail    = 11
+	ComponentMediaGallery = 12
+	ComponentSeparator    = 14
+	ComponentContainer    = 17
 )
 
 // A Component is one node of a Components V2 layout. discordgo v0.29.0 has no
@@ -87,13 +90,21 @@ type Component struct {
 	Content string `json:"content,omitempty"`
 	// Media is a thumbnail's image.
 	Media *UnfurledMedia `json:"media,omitempty"`
+	// Items are a media gallery's images.
+	Items []GalleryItem `json:"items,omitempty"`
 	// AccentColor is a container's stripe colour, as 0xRRGGBB.
 	AccentColor *int `json:"accent_color,omitempty"`
 }
 
-// UnfurledMedia names an image by URL, which Discord fetches itself.
+// UnfurledMedia names an image by URL, which Discord fetches itself, or an
+// uploaded file as "attachment://<Name>".
 type UnfurledMedia struct {
 	URL string `json:"url"`
+}
+
+// A GalleryItem is one image of a media gallery.
+type GalleryItem struct {
+	Media UnfurledMedia `json:"media"`
 }
 
 // Container returns a container with an accent colour around children.
@@ -115,6 +126,15 @@ func TextDisplay(markdown string) Component {
 // Thumbnail returns the image at url, as a section's accessory.
 func Thumbnail(url string) Component {
 	return Component{Type: ComponentThumbnail, Media: &UnfurledMedia{URL: url}}
+}
+
+// MediaGallery returns a gallery showing the images at urls, full width.
+func MediaGallery(urls ...string) Component {
+	items := make([]GalleryItem, len(urls))
+	for i, url := range urls {
+		items[i] = GalleryItem{Media: UnfurledMedia{URL: url}}
+	}
+	return Component{Type: ComponentMediaGallery, Items: items}
 }
 
 // Separator returns a divider line with Discord's default spacing.

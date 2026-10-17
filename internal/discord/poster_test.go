@@ -452,6 +452,44 @@ func TestPostComponents(t *testing.T) {
 	}
 }
 
+// The strip card is a components message with its PNG: one multipart upload
+// carrying the flags, the components and the file, sent whole again on retry.
+func TestPostComponentsWithFiles(t *testing.T) {
+	fake, url := newFakeDiscord(t)
+	fake.postStatuses = []int{http.StatusServiceUnavailable, 0}
+	poster, _ := newPoster(t, url)
+	msg := testComponents()
+	msg.Components[0].Components = append(msg.Components[0].Components, MediaGallery("attachment://kill.png"))
+	msg.Files = testStrip().Files
+
+	if err := poster.Post(context.Background(), msg); err != nil {
+		t.Fatalf("Post() = %v", err)
+	}
+
+	received := fake.received()
+	if len(received) != 2 {
+		t.Fatalf("fake served %d posts, want 2", len(received))
+	}
+	want, err := json.Marshal(msg.Components)
+	if err != nil {
+		t.Fatalf("marshalling the components: %v", err)
+	}
+	for i, sent := range received {
+		if !strings.HasPrefix(sent.ContentType, "multipart/form-data") {
+			t.Errorf("attempt %d: Content-Type = %q, want a multipart upload", i+1, sent.ContentType)
+		}
+		if sent.Flags != 32768 || len(sent.Embeds) != 0 {
+			t.Errorf("attempt %d: flags = %d with %d embeds, want 32768 (IS_COMPONENTS_V2) and none", i+1, sent.Flags, len(sent.Embeds))
+		}
+		if string(sent.Components) != string(want) {
+			t.Errorf("attempt %d: components = %s, want %s", i+1, sent.Components, want)
+		}
+		if len(sent.Files) != 1 || sent.Files[0].Name != "kill.png" || string(sent.Files[0].Data) != string(msg.Files[0].Data) {
+			t.Errorf("attempt %d: files = %+v, want the whole kill.png", i+1, sent.Files)
+		}
+	}
+}
+
 // A components post is rate limited and retried like an embed.
 func TestPostComponentsRetries(t *testing.T) {
 	fake, url := newFakeDiscord(t)
@@ -522,7 +560,6 @@ func TestPostRejectsMalformedMessages(t *testing.T) {
 	}{
 		{name: "empty", msg: Message{}},
 		{name: "embed and components", msg: Message{Embed: testEmbed(), Components: testComponents().Components}},
-		{name: "components and files", msg: Message{Components: testComponents().Components, Files: testStrip().Files}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake, url := newFakeDiscord(t)

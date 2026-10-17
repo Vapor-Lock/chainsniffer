@@ -43,15 +43,21 @@ an image that cannot be fetched SHALL NOT prevent the post or delay it beyond a 
 - **THEN** the card is posted within a few seconds, with blank tiles where the images would be
 
 ### Requirement: Portrait strip layout
-In the `strip` card style, the embed SHALL be the `block` style's embed plus an attached image shown
-under the monospace block. The image's left half SHALL show the victim: corporation logo above
+In the `strip` card style, the card SHALL be the `components` card with an attached image, shown
+in a media gallery under the monospace block in place of the victim and final-blow sections, so
+that its header, block and footer line read exactly as the `components` card's. A strip that cannot
+be drawn SHALL leave the gallery out and post the rest. The image's left half SHALL show the victim: corporation logo above
 alliance logo at the outer edge, then the character portrait, then the victim's name above their
 hull. Its right half SHALL mirror this for the final blow, text right-aligned. A missing image SHALL
 leave its tile blank.
 
 #### Scenario: Typical kill as a strip
 - **WHEN** the typical Stratios kill is posted in the `strip` style
-- **THEN** the embed carries the block card's monospace block, and its image shows Pilot A and `Stratios` with Pilot A's portrait and their corporation and alliance logos on the left, and Pilot B and `Loki` with Pilot B's portrait and logos on the right
+- **THEN** the card carries the `components` card's title, monospace block and footer line, and its image shows Pilot A and `Stratios` with Pilot A's portrait and their corporation and alliance logos on the left, and Pilot B and `Loki` with Pilot B's portrait and logos on the right
+
+#### Scenario: Same footer as the components card
+- **WHEN** the same kill is posted in the `strip` and the `components` style
+- **THEN** both footers read the classification and the kill time in the reader's own time zone, in the same small text
 
 #### Scenario: Victim without an alliance
 - **WHEN** the victim has a corporation but no alliance ID
