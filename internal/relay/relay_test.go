@@ -203,6 +203,17 @@ func wantPosted(t *testing.T, f *fixture, want ...int64) {
 	}
 }
 
+// systemRow returns the value of the System row in the embed's monospace
+// block, or "" when it has none.
+func systemRow(embed *discordgo.MessageEmbed) string {
+	for _, line := range strings.Split(embed.Description, "\n") {
+		if value, ok := strings.CutPrefix(line, "System     "); ok {
+			return value
+		}
+	}
+	return ""
+}
+
 func TestHandlePostsEveryKillmailInOrder(t *testing.T) {
 	f := newFixture(t)
 
@@ -213,8 +224,8 @@ func TestHandlePostsEveryKillmailInOrder(t *testing.T) {
 		t.Errorf("marked as posted = %v, want [1 2 3]", f.store.posted)
 	}
 	// The embed is rendered from the resolved system name, not the raw ID.
-	if got := f.poster.embeds[0].Fields[0].Value; got != systemName {
-		t.Errorf("system field = %q, want %q", got, systemName)
+	if got := systemRow(f.poster.embeds[0]); got != systemName {
+		t.Errorf("System row = %q, want %q", got, systemName)
 	}
 	if got := f.resolver.asked; !slices.Equal(got, []int64{systemID, systemID, systemID}) {
 		t.Errorf("resolver asked for %v, want the system of all three kills", got)
@@ -683,8 +694,8 @@ func TestHandleRendersTheChainAlias(t *testing.T) {
 
 	f.handle(t, envelope(t, "01JB", kill(1)))
 
-	if got, want := f.poster.embeds[0].Fields[0].Value, systemName+" (HOTEL)"; got != want {
-		t.Errorf("system field = %q, want %q", got, want)
+	if got, want := systemRow(f.poster.embeds[0]), systemName+" (HOTEL)"; got != want {
+		t.Errorf("System row = %q, want %q", got, want)
 	}
 	if !strings.Contains(f.logs.String(), "chain_alias=HOTEL") {
 		t.Errorf("the posted-killmail log line does not name the alias:\n%s", f.logs)
@@ -692,7 +703,7 @@ func TestHandleRendersTheChainAlias(t *testing.T) {
 }
 
 // Without an alias, from no Aliases at all or for a system it does not name,
-// the System field is the name alone and the log line has no chain_alias.
+// the System row is the name alone and the log line has no chain_alias.
 func TestHandleRendersTheNameAloneWithoutAnAlias(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -706,8 +717,8 @@ func TestHandleRendersTheNameAloneWithoutAnAlias(t *testing.T) {
 
 			f.handle(t, envelope(t, "01JB", kill(1)))
 
-			if got := f.poster.embeds[0].Fields[0].Value; got != systemName {
-				t.Errorf("system field = %q, want %q", got, systemName)
+			if got := systemRow(f.poster.embeds[0]); got != systemName {
+				t.Errorf("System row = %q, want %q", got, systemName)
 			}
 			if strings.Contains(f.logs.String(), "chain_alias") {
 				t.Errorf("the log names a chain alias for a system without one:\n%s", f.logs)

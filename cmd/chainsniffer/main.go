@@ -159,7 +159,7 @@ func serve(ctx context.Context, logger *slog.Logger, cfg *config.Config, o optio
 	clientOpts := []wanderer.Option{wanderer.WithLogger(logger)}
 
 	// The topology is always followed, since it is where the chain aliases
-	// in the System field come from; a home system only adds the
+	// in the System row come from; a home system only adds the
 	// linked-system filter on top of it.
 	var client *wanderer.Client
 	graph := topology.New(cfg.HomeSystemID, topology.WithLogger(logger))

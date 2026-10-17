@@ -24,6 +24,75 @@ func killTime(t *testing.T, s string) time.Time {
 	return ts
 }
 
+// blockRow is one labelled row of the embed's monospace block, with the lines
+// of its value, continuation lines included.
+type blockRow struct {
+	label string
+	lines []string
+}
+
+// padding returns the description's last line, the width padding, after
+// checking that it is a run of U+2800 BRAILLE PATTERN BLANK characters, and the
+// description without it.
+func padding(t *testing.T, description string) (pad, rest string) {
+	t.Helper()
+	if i := strings.LastIndex(description, "\n"); i >= 0 {
+		rest, pad = description[:i], description[i+1:]
+	} else {
+		rest, pad = "", description
+	}
+	if pad == "" || strings.Trim(pad, "\u2800") != "" {
+		t.Fatalf("description does not end in a line of U+2800 padding:\n%s", description)
+	}
+	return pad, rest
+}
+
+// blockRows parses the embed description's code block back into rows,
+// checking the layout on the way: a fenced block followed by the padding line,
+// no line over 40 runes, every label in the 11-column label column and every
+// value starting in column 12.
+func blockRows(t *testing.T, description string) []blockRow {
+	t.Helper()
+	_, description = padding(t, description)
+	if description == "" {
+		return nil
+	}
+	lines := strings.Split(description, "\n")
+	if len(lines) < 2 || lines[0] != "```" || lines[len(lines)-1] != "```" {
+		t.Fatalf("description is not one code block:\n%s", description)
+	}
+	var rows []blockRow
+	for _, line := range lines[1 : len(lines)-1] {
+		r := []rune(line)
+		if len(r) > 40 {
+			t.Errorf("block line %q is %d runes, want at most 40", line, len(r))
+		}
+		if len(r) <= 11 || r[10] != ' ' || r[11] == ' ' {
+			t.Fatalf("block line %q does not have its value in column 12", line)
+		}
+		label, value := strings.TrimSpace(string(r[:11])), string(r[11:])
+		if label == "" {
+			if len(rows) == 0 {
+				t.Fatalf("block starts with a continuation line %q", line)
+			}
+			rows[len(rows)-1].lines = append(rows[len(rows)-1].lines, value)
+			continue
+		}
+		rows = append(rows, blockRow{label: label, lines: []string{value}})
+	}
+	return rows
+}
+
+// rowValues maps each row's label to its value lines joined by newlines.
+func rowValues(t *testing.T, description string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, r := range blockRows(t, description) {
+		out[r.label] = strings.Join(r.lines, "\n")
+	}
+	return out
+}
+
 // typicalKill is the kill from the discord-killmail-posting spec's "Typical
 // kill" scenario: a Stratios flown by Pilot A [CORP], final blow by Pilot B in
 // a Loki, 7 attackers, 412,500,000 ISK.
@@ -101,7 +170,7 @@ func TestRenderGolden(t *testing.T) {
 		},
 		{
 			// "Kill in a named system": the map's temporary name follows the
-			// system name in the System field.
+			// system name in the System row.
 			name:       "chain alias",
 			golden:     "render_alias.json",
 			kill:       typicalKill(t),
@@ -145,8 +214,8 @@ func TestRenderGolden(t *testing.T) {
 	}
 }
 
-// "Typical kill": the title names the ship and the pilot, and the fields carry
-// everything the requirement lists.
+// "Typical kill" and "Aligned rows": the title names the ship and the pilot,
+// and the block's rows carry everything the requirement lists, in order.
 func TestRenderTypicalKillContent(t *testing.T) {
 	embed := discord.Render(typicalKill(t), killmail.Kill, "J123456", "")
 
@@ -157,27 +226,77 @@ func TestRenderTypicalKillContent(t *testing.T) {
 		t.Errorf("Timestamp = %q, want the kill time %q", got, want)
 	}
 
-	fields := map[string]string{}
-	for _, f := range embed.Fields {
-		if !f.Inline {
-			t.Errorf("field %q is not inline", f.Name)
+	if len(embed.Fields) != 0 {
+		t.Errorf("Fields = %+v, want none: the details belong in the description", embed.Fields)
+	}
+
+	want := []blockRow{
+		{"System", []string{"J123456"}},
+		{"Value", []string{"412.5M ISK"}},
+		{"Attackers", []string{"7"}},
+		{"Victim", []string{"[CORP] Victim Corporation", "<VCTM> Victim Alliance"}},
+		{"Final blow", []string{"Pilot B (Loki)", "[FRND] Friendly Corporation", "<BLUE> Friendly Alliance"}},
+	}
+	got := blockRows(t, embed.Description)
+	if len(got) != len(want) {
+		t.Fatalf("block rows = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i].label != want[i].label || strings.Join(got[i].lines, "\n") != strings.Join(want[i].lines, "\n") {
+			t.Errorf("row %d = %+v, want %+v", i, got[i], want[i])
 		}
-		fields[f.Name] = f.Value
 	}
-	want := map[string]string{
-		"System":     "J123456",
-		"Value":      "412.5M ISK",
-		"Attackers":  "7",
-		"Victim":     "[CORP] Victim Corporation / <VCTM> Victim Alliance",
-		"Final blow": "Pilot B (Loki)\n[FRND] Friendly Corporation / <BLUE> Friendly Alliance",
+}
+
+// "Row with nothing to show": a row without a value is dropped, label and all.
+func TestRenderDropsEmptyRows(t *testing.T) {
+	k := typicalKill(t)
+	k.TotalValue = 0
+	k.AttackerCount = 0
+	var labels []string
+	for _, r := range blockRows(t, discord.Render(k, killmail.Kill, "J123456", "").Description) {
+		labels = append(labels, r.label)
 	}
-	for name, value := range want {
-		if got := fields[name]; got != value {
-			t.Errorf("field %q = %q, want %q", name, got, value)
-		}
+	if got, want := strings.Join(labels, ","), "System,Victim,Final blow"; got != want {
+		t.Errorf("row labels = %s, want %s", got, want)
 	}
-	if len(fields) != len(want) {
-		t.Errorf("fields = %v, want exactly %d of them", fields, len(want))
+}
+
+// "Long value wraps": a value too long for the value column continues on lines
+// indented to it, and no line of the block exceeds 40 columns.
+func TestRenderWrapsLongValues(t *testing.T) {
+	tests := []struct {
+		name     string
+		corpName string
+		want     []string
+	}{
+		{
+			name:     "breaks at the last space that fits",
+			corpName: "The Exceedingly Long Corporation Name of Doom",
+			want:     []string{"[CORP] The Exceedingly Long", "Corporation Name of Doom", "<VCTM> Victim Alliance"},
+		},
+		{
+			name:     "hard-breaks a word longer than the column",
+			corpName: strings.Repeat("x", 40),
+			want:     []string{"[CORP]", strings.Repeat("x", 29), strings.Repeat("x", 11), "<VCTM> Victim Alliance"},
+		},
+		{
+			name:     "fits exactly",
+			corpName: strings.Repeat("y", 22),
+			want:     []string{"[CORP] " + strings.Repeat("y", 22), "<VCTM> Victim Alliance"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			k := typicalKill(t)
+			k.Victim.CorpName = tc.corpName
+			embed := discord.Render(k, killmail.Kill, "J123456", "")
+			// blockRows fails the test on any line over 40 runes or with its
+			// value outside column 12.
+			if got, want := rowValues(t, embed.Description)["Victim"], strings.Join(tc.want, "\n"); got != want {
+				t.Errorf("Victim row = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -236,6 +355,37 @@ func TestRenderClassificationStyling(t *testing.T) {
 	}
 }
 
+// "Uniform card width": every classification of a killmail ends in the same
+// padding line, 37 runes when the card has a ship thumbnail and 46 when it has
+// none, and only the neutral one has no footer.
+func TestRenderPadsEveryClassification(t *testing.T) {
+	noShip := typicalKill(t)
+	noShip.Victim.ShipTypeID = 0
+	for _, tc := range []struct {
+		name      string
+		k         killmail.Killmail
+		thumbnail bool
+		want      int
+	}{
+		{"thumbnail", typicalKill(t), true, 37},
+		{"no thumbnail", noShip, false, 46},
+	} {
+		for _, class := range []killmail.Classification{killmail.Loss, killmail.Kill, killmail.Neutral} {
+			embed := discord.Render(tc.k, class, "Thera", "")
+			if (embed.Thumbnail != nil) != tc.thumbnail {
+				t.Fatalf("%s %s: Thumbnail = %+v", tc.name, class, embed.Thumbnail)
+			}
+			pad, _ := padding(t, embed.Description)
+			if got := len([]rune(pad)); got != tc.want {
+				t.Errorf("%s %s padding is %d runes, want %d", tc.name, class, got, tc.want)
+			}
+			if class == killmail.Neutral && embed.Footer != nil {
+				t.Errorf("%s neutral Footer = %+v, want nil", tc.name, embed.Footer)
+			}
+		}
+	}
+}
+
 // "Missing optional fields": whatever the payload left out is dropped, and the
 // embed is still postable.
 func TestRenderDegradesGracefully(t *testing.T) {
@@ -247,8 +397,8 @@ func TestRenderDegradesGracefully(t *testing.T) {
 	if got, want := embed.URL, "https://zkillboard.com/kill/42/"; got != want {
 		t.Errorf("URL = %q, want %q", got, want)
 	}
-	if len(embed.Fields) != 0 {
-		t.Errorf("Fields = %+v, want none when the payload carried nothing", embed.Fields)
+	if _, rest := padding(t, embed.Description); rest != "" {
+		t.Errorf("Description = %q, want no block, only the padding, when the payload carried nothing", embed.Description)
 	}
 	if embed.Timestamp != "" {
 		t.Errorf("Timestamp = %q, want empty when kill_time is unknown", embed.Timestamp)
@@ -280,7 +430,7 @@ func TestRenderPartialAffiliations(t *testing.T) {
 			name:            "tickers only",
 			victim:          killmail.Party{CharName: "Pilot A", CorpTicker: "CORP", AllianceTicker: "VCTM", ShipName: "Stratios"},
 			finalBlow:       killmail.Party{AllianceTicker: "BLUE"},
-			wantVictim:      "[CORP] / <VCTM>",
+			wantVictim:      "[CORP]\n<VCTM>",
 			wantFinalBlow:   "<BLUE>",
 			wantTitlePrefix: "Stratios — Pilot A",
 		},
@@ -299,40 +449,33 @@ func TestRenderPartialAffiliations(t *testing.T) {
 			if got := embed.Title; got != tc.wantTitlePrefix {
 				t.Errorf("Title = %q, want %q", got, tc.wantTitlePrefix)
 			}
-			fields := map[string]string{}
-			for _, f := range embed.Fields {
-				fields[f.Name] = f.Value
+			rows := rowValues(t, embed.Description)
+			if got := rows["Victim"]; got != tc.wantVictim {
+				t.Errorf("Victim row = %q, want %q", got, tc.wantVictim)
 			}
-			if got := fields["Victim"]; got != tc.wantVictim {
-				t.Errorf("Victim field = %q, want %q", got, tc.wantVictim)
-			}
-			if got := fields["Final blow"]; got != tc.wantFinalBlow {
-				t.Errorf("Final blow field = %q, want %q", got, tc.wantFinalBlow)
-			}
-			for name, value := range fields {
-				if strings.Contains(value, " / ") && !strings.Contains(tc.wantVictim+tc.wantFinalBlow, " / ") {
-					t.Errorf("field %q = %q, want no dangling separator", name, value)
-				}
+			if got := rows["Final blow"]; got != tc.wantFinalBlow {
+				t.Errorf("Final blow row = %q, want %q", got, tc.wantFinalBlow)
 			}
 		})
 	}
 }
 
-// systemField renders the typical kill with the given name and alias and
-// returns the System field's value.
-func systemField(t *testing.T, systemName, alias string) string {
+// systemRow renders the typical kill with the given name and alias and
+// returns the System row's value, its lines joined by newlines.
+func systemRow(t *testing.T, systemName, alias string) string {
 	t.Helper()
-	for _, f := range discord.Render(typicalKill(t), killmail.Kill, systemName, alias).Fields {
-		if f.Name == "System" {
-			return f.Value
+	for _, r := range blockRows(t, discord.Render(typicalKill(t), killmail.Kill, systemName, alias).Description) {
+		if r.label == "System" {
+			return strings.Join(r.lines, "\n")
 		}
 	}
-	t.Fatalf("no System field for name %q and alias %q", systemName, alias)
+	t.Fatalf("no System row for name %q and alias %q", systemName, alias)
 	return ""
 }
 
-// "Chain alias": the alias follows the name in parentheses, is escaped for
-// Discord markdown and capped, and an empty alias leaves the name alone.
+// "Chain alias" and "Markdown characters in an alias": the alias follows the
+// name in parentheses, literally, and capped, and an empty alias leaves the
+// name alone.
 func TestRenderChainAlias(t *testing.T) {
 	long := strings.Repeat("a", 300)
 	tests := []struct {
@@ -344,16 +487,44 @@ func TestRenderChainAlias(t *testing.T) {
 		{name: "named system", systemName: "J134349", alias: "HOTEL", want: "J134349 (HOTEL)"},
 		{name: "name not resolved", systemName: "31001234", alias: "HOTEL", want: "31001234 (HOTEL)"},
 		{name: "no alias", systemName: "J134349", alias: "", want: "J134349"},
-		{name: "markdown escaped", systemName: "J134349", alias: "A_B_", want: `J134349 (A\_B\_)`},
-		{name: "every markdown character", systemName: "J134349", alias: "\\*_~`|", want: "J134349 (\\\\\\*\\_\\~\\`\\|)"},
-		{name: "capped", systemName: "J134349", alias: long, want: "J134349 (" + long[:100] + ")"},
+		{name: "markdown shown literally", systemName: "J134349", alias: "A_B_", want: "J134349 (A_B_)"},
+		{name: "every markdown character", systemName: "J134349", alias: `\*_~|`, want: `J134349 (\*_~|)`},
+		{name: "backtick neutralised", systemName: "J134349", alias: "A`B", want: "J134349 (A\u02cbB)"},
+		// The capped alias is still too long for one line, so it wraps
+		// after the name and then breaks hard every 29 columns.
+		{name: "capped", systemName: "J134349", alias: long, want: "J134349\n(" + long[:28] + "\n" + long[:29] + "\n" + long[:29] + "\n" + long[:14] + ")"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := systemField(t, tc.systemName, tc.alias); got != tc.want {
-				t.Errorf("System field = %q, want %q", got, tc.want)
+			if got := systemRow(t, tc.systemName, tc.alias); got != tc.want {
+				t.Errorf("System row = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// "Backticks in a name": a backtick anywhere in the block becomes U+02CB, so
+// the block keeps exactly its two fences.
+func TestRenderNeutralisesBackticks(t *testing.T) {
+	k := typicalKill(t)
+	k.Victim.CorpName = "Evil ``` Corp"
+	k.Victim.AllianceTicker = "`A`"
+	k.FinalBlow.CharName = "Pilot `B`"
+	k.FinalBlow.ShipName = "Lo`ki"
+	embed := discord.Render(k, killmail.Kill, "J134349", "`HOTEL`")
+
+	if got := strings.Count(embed.Description, "```"); got != 2 {
+		t.Errorf("description has %d fences, want 2:\n%s", got, embed.Description)
+	}
+	rows := rowValues(t, embed.Description)
+	if got, want := rows["Victim"], "[CORP] Evil \u02cb\u02cb\u02cb Corp\n<\u02cbA\u02cb> Victim Alliance"; got != want {
+		t.Errorf("Victim row = %q, want %q", got, want)
+	}
+	if got, want := strings.Split(rows["Final blow"], "\n")[0], "Pilot \u02cbB\u02cb (Lo\u02cbki)"; got != want {
+		t.Errorf("Final blow pilot line = %q, want %q", got, want)
+	}
+	if got, want := rows["System"], "J134349 (\u02cbHOTEL\u02cb)"; got != want {
+		t.Errorf("System row = %q, want %q", got, want)
 	}
 }
 

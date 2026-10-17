@@ -101,8 +101,8 @@ func TestRelayPostsFiltersAndResumes(t *testing.T) {
 	if want := discord.ColorLoss; posts[0].Color != want {
 		t.Errorf("posted embed color = %#x, want %#x: the victim corp is configured as friendly", posts[0].Color, want)
 	}
-	if !hasField(posts[0], testSystemName) {
-		t.Errorf("posted embed has no field naming system %q: %+v", testSystemName, posts[0].Fields)
+	if !hasSystemRow(posts[0], testSystemName) {
+		t.Errorf("posted embed has no System row naming %q:\n%s", testSystemName, posts[0].Description)
 	}
 
 	// The state is what makes the restart below safe: the cursor to resume
@@ -247,7 +247,7 @@ func TestRelayFiltersToTheHomeChain(t *testing.T) {
 
 // TestRelayShowsTheChainAlias covers chain-aliases end to end, with and
 // without a home system: the alias the snapshot names is rendered in the
-// System field, a system_metadata_changed rename shows on the next kill, and
+// System row, a system_metadata_changed rename shows on the next kill, and
 // only with a home system is a kill in an island dropped.
 func TestRelayShowsTheChainAlias(t *testing.T) {
 	const (
@@ -299,8 +299,8 @@ func TestRelayShowsTheChainAlias(t *testing.T) {
 				t.Fatalf("Discord received %d posts, want %d; logs:\n%s", len(posts), tc.wantPosts, logs)
 			}
 			for i, want := range []string{testSystemName + " (HOTEL)", testSystemName + " (INDIA)"} {
-				if !hasField(posts[i], want) {
-					t.Errorf("post %d has no System field %q: %+v", i, want, posts[i].Fields)
+				if !hasSystemRow(posts[i], want) {
+					t.Errorf("post %d has no System row %q:\n%s", i, want, posts[i].Description)
 				}
 			}
 			assertLogged(t, logs.String(), map[string]any{
@@ -608,14 +608,10 @@ func equalIDs(got, want []int64) bool {
 	return true
 }
 
-// hasField reports whether one of the embed's fields carries value.
-func hasField(embed *discordgo.MessageEmbed, value string) bool {
-	for _, f := range embed.Fields {
-		if f.Value == value {
-			return true
-		}
-	}
-	return false
+// hasSystemRow reports whether the System row of the embed's monospace block
+// reads value.
+func hasSystemRow(embed *discordgo.MessageEmbed, value string) bool {
+	return strings.Contains(embed.Description, "\nSystem     "+value+"\n")
 }
 
 // assertJSONLogs checks that every line of the log is one JSON object, which

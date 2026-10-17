@@ -95,7 +95,7 @@ type Topology interface {
 }
 
 // Aliases answers a solar system's chain alias, the temporary name the map
-// gives it, for the embed's System field.
+// gives it, for the embed's System row.
 //
 // It is internal/topology's graph, the same one the [Topology] events go to.
 // Alias returns "" for a system with no alias or not on the map.

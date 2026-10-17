@@ -2,6 +2,7 @@
   "url": "https://zkillboard.com/kill/123456789/",
   "type": "rich",
   "title": "Stratios — Pilot A",
+  "description": "```\nSystem     J123456\nValue      412.5M ISK\nAttackers  7\nVictim     [CORP] Victim Corporation\n           \u003cVCTM\u003e Victim Alliance\nFinal blow Pilot B (Loki)\n           [FRND] Friendly Corporation\n           \u003cBLUE\u003e Friendly Alliance\n```\n⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
   "timestamp": "2026-10-13T18:42:07Z",
   "color": 12597547,
   "footer": {
@@ -9,32 +10,5 @@
   },
   "thumbnail": {
     "url": "https://images.evetech.net/types/33470/render?size=128"
-  },
-  "fields": [
-    {
-      "name": "System",
-      "value": "J123456",
-      "inline": true
-    },
-    {
-      "name": "Value",
-      "value": "412.5M ISK",
-      "inline": true
-    },
-    {
-      "name": "Attackers",
-      "value": "7",
-      "inline": true
-    },
-    {
-      "name": "Victim",
-      "value": "[CORP] Victim Corporation / \u003cVCTM\u003e Victim Alliance",
-      "inline": true
-    },
-    {
-      "name": "Final blow",
-      "value": "Pilot B (Loki)\n[FRND] Friendly Corporation / \u003cBLUE\u003e Friendly Alliance",
-      "inline": true
-    }
-  ]
+  }
 }
