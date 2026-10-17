@@ -48,6 +48,8 @@ const (
 // Everything but the title, the link, the thumbnail, the colour, the
 // timestamp and the footer goes in the description as one monospace block of
 // labelled rows (see block), so the rows line up the same way on every card.
+// The description ends in padLine, whatever the classification, so every card
+// is drawn at the same width.
 //
 // Render is a pure function of its arguments — posting lives elsewhere in this
 // package — so the layout is covered by golden tests. Every field of a
@@ -60,7 +62,7 @@ func Render(k killmail.Killmail, c killmail.Classification, systemName, alias st
 		Title:       title(k.Victim),
 		URL:         fmt.Sprintf(killURL, k.ID),
 		Color:       color(c),
-		Description: block(rows(k, system(systemName, alias))),
+		Description: join("\n", block(rows(k, system(systemName, alias))), padLine),
 	}
 	if k.Victim.ShipTypeID > 0 {
 		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
@@ -184,6 +186,23 @@ const (
 // close the block's fence early. Text inside the block is otherwise shown
 // verbatim.
 var fenceSafe = strings.NewReplacer("`", "\u02cb")
+
+// padRunes is how many U+2800 BRAILLE PATTERN BLANK characters make up
+// padLine. Discord does not trim U+2800 as whitespace and draws it blank,
+// so the line is invisible but has width, and it must be wider than
+// Discord's maximum desktop embed width of about 520px for every card to
+// be drawn at that maximum. The blank is drawn about half an em wide, some
+// 7px in the embed's 14px text, so 80 of them come to roughly 560px. The
+// count errs high on purpose: a run too long only wraps onto a second
+// blank line, while one too short leaves cards ragged. The live check in
+// a Discord channel tunes it.
+const padRunes = 80
+
+// padLine ends every description, so that every card, a neutral one included,
+// is padded alike. It goes in the description rather than the footer because
+// Discord draws the timestamp on the footer line, after the footer text, which
+// padding there would push away.
+var padLine = strings.Repeat("\u2800", padRunes)
 
 // block lays the rows out as one code block: each label left-aligned in the
 // label column, its value after it, and every further line of the value,

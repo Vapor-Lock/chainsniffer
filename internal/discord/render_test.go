@@ -31,11 +31,29 @@ type blockRow struct {
 	lines []string
 }
 
+// padding returns the description's last line, the width padding, after
+// checking that it is a run of U+2800 BRAILLE PATTERN BLANK characters, and the
+// description without it.
+func padding(t *testing.T, description string) (pad, rest string) {
+	t.Helper()
+	if i := strings.LastIndex(description, "\n"); i >= 0 {
+		rest, pad = description[:i], description[i+1:]
+	} else {
+		rest, pad = "", description
+	}
+	if pad == "" || strings.Trim(pad, "\u2800") != "" {
+		t.Fatalf("description does not end in a line of U+2800 padding:\n%s", description)
+	}
+	return pad, rest
+}
+
 // blockRows parses the embed description's code block back into rows,
-// checking the layout on the way: a fenced block, no line over 40 runes, every
-// label in the 11-column label column and every value starting in column 12.
+// checking the layout on the way: a fenced block followed by the padding line,
+// no line over 40 runes, every label in the 11-column label column and every
+// value starting in column 12.
 func blockRows(t *testing.T, description string) []blockRow {
 	t.Helper()
+	_, description = padding(t, description)
 	if description == "" {
 		return nil
 	}
@@ -337,6 +355,24 @@ func TestRenderClassificationStyling(t *testing.T) {
 	}
 }
 
+// "Uniform card width": a loss, a kill and a neutral kill of one killmail end
+// in the same padding line, and only the neutral one has no footer.
+func TestRenderPadsEveryClassification(t *testing.T) {
+	var want string
+	for _, class := range []killmail.Classification{killmail.Loss, killmail.Kill, killmail.Neutral} {
+		embed := discord.Render(typicalKill(t), class, "Thera", "")
+		pad, _ := padding(t, embed.Description)
+		if want == "" {
+			want = pad
+		} else if pad != want {
+			t.Errorf("%s padding is %d runes, want the same %d runes as a loss", class, len([]rune(pad)), len([]rune(want)))
+		}
+		if class == killmail.Neutral && embed.Footer != nil {
+			t.Errorf("neutral Footer = %+v, want nil", embed.Footer)
+		}
+	}
+}
+
 // "Missing optional fields": whatever the payload left out is dropped, and the
 // embed is still postable.
 func TestRenderDegradesGracefully(t *testing.T) {
@@ -348,8 +384,8 @@ func TestRenderDegradesGracefully(t *testing.T) {
 	if got, want := embed.URL, "https://zkillboard.com/kill/42/"; got != want {
 		t.Errorf("URL = %q, want %q", got, want)
 	}
-	if embed.Description != "" {
-		t.Errorf("Description = %q, want no block when the payload carried nothing", embed.Description)
+	if _, rest := padding(t, embed.Description); rest != "" {
+		t.Errorf("Description = %q, want no block, only the padding, when the payload carried nothing", embed.Description)
 	}
 	if embed.Timestamp != "" {
 		t.Errorf("Timestamp = %q, want empty when kill_time is unknown", embed.Timestamp)
