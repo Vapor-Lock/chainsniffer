@@ -18,7 +18,7 @@ The operator chooses between them.
 ## What Changes
 
 - `CHAINSNIFFER_CARD_STYLE` gains two values, `strip` and `components`, beside `block` and
-  `fields`. **The default becomes `strip`.**
+  `fields`. **The default becomes `components`.**
 - **`strip`:** the block card, monospace block unchanged, plus a PNG the relay draws and attaches
   as the embed image, so it shows under the block.
   - The left half shows the victim: corporation logo over alliance logo on the outer edge, the
@@ -54,7 +54,7 @@ None.
   images" requirements. "Startup channel check" and "Fatal Discord errors" now cover Attach Files
   for the strip.
 - `relay-runtime`: "Card style configuration" (introduced by `card-style-toggle`) accepts `strip`
-  and `components`, and defaults to `strip`.
+  and `components`, and defaults to `components`.
 
 ## Impact
 

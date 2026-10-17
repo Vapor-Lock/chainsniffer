@@ -9,7 +9,7 @@
 ## 2. Layouts
 
 - [ ] 2.1 Add `discord.ComponentsMessage` per the design (container colour, header section with ship render, the shared monospace block, separator, victim and final-blow sections with the alliance, then corporation, then portrait accessory, timestamp footer) and `discord.StripMessage(embed, png)`. Verify with golden JSON for typical, no alliance, no corporation, no IDs, and neutral, plus a test that the strip embed's image is `attachment://kill.png`.
-- [ ] 2.2 Extend the card style in `internal/config` and `internal/discord` with `strip` and `components`, defaulting to `strip`. Verify with config tests for the default, both new values, and the error message listing all four.
+- [ ] 2.2 Extend the card style in `internal/config` and `internal/discord` with `strip` and `components`, defaulting to `components` (moved from `strip` after the live check). Verify with config tests for the default, both new values, and the error message listing all four.
 
 ## 3. Wiring
 

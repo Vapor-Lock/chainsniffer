@@ -77,7 +77,7 @@ func TestLoadMinimal(t *testing.T) {
 		StateDir:               "/var/lib/chainsniffer",
 		LogLevel:               slog.LevelInfo,
 		LogFormat:              config.LogFormatText,
-		CardStyle:              config.CardStyleStrip,
+		CardStyle:              config.CardStyleComponents,
 	}
 	// want leaves both friendly ID slices nil, which is what no configured
 	// friendly IDs has to produce.
@@ -778,7 +778,7 @@ func TestConfigLogValueIncludesTopology(t *testing.T) {
 func TestConfigLogValueIncludesCardStyle(t *testing.T) {
 	t.Parallel()
 
-	tests := map[string]string{"": "card_style=strip", "block": "card_style=block", "fields": "card_style=fields"}
+	tests := map[string]string{"": "card_style=components", "strip": "card_style=strip", "block": "card_style=block", "fields": "card_style=fields"}
 	for value, want := range tests {
 		t.Run(want, func(t *testing.T) {
 			t.Parallel()

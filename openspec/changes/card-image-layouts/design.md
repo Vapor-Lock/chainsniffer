@@ -140,14 +140,16 @@ content.
 ### Configuration and permissions
 
 The `CardStyle` constants in `config` and `discord` gain `strip` and `components`, and the default
-moves to `strip`. `discord.New` takes a `WithAttachFiles(bool)` option, which `cmd/chainsniffer`
+moves to `components`. It was `strip` until the live check, which settled on the component card as
+the default; `strip` stays one setting away, and a default without an upload needs no new
+permission. `discord.New` takes a `WithAttachFiles(bool)` option, which `cmd/chainsniffer`
 sets for the `strip` style. It adds Attach Files to `missingPermissions` and to the 403/404 hint.
 
 ## Risks / Trade-offs
 
-- [Existing deployments lack Attach Files once the default is `strip`] → the startup check stops
-  the relay before it connects, naming the permission. The README and the PR call it out, and
-  `CHAINSNIFFER_CARD_STYLE=block` is the one-line way back.
+- [A deployment that picks `strip` lacks Attach Files] → the startup check stops the relay before
+  it connects, naming the permission. The default, `components`, uploads nothing and needs no new
+  permission; `CHAINSNIFFER_CARD_STYLE=block` is the one-line way back to the earlier cards.
 - [Discord shows embed images small, so the strip's text may be tiny] → the canvas size and font
   sizes are constants, tuned in the live check against real cards.
 - [Image server slow] → a strip card waits at most about 3 seconds, then draws blank tiles. Repeat

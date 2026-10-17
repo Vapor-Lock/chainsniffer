@@ -107,10 +107,9 @@ func TestRelayPostsFiltersAndResumes(t *testing.T) {
 	if !hasSystemRow(posts[0], testSystemName) {
 		t.Errorf("posted card has no System row naming %q:\n%s", testSystemName, posts[0].Text)
 	}
-	// strip is the default style, and the strip goes out with blank tiles
-	// when the image server has nothing.
-	if posts[0].Image != "attachment://kill.png" {
-		t.Errorf("posted card image = %q, want the strip, attachment://kill.png", posts[0].Image)
+	// components is the default style, which attaches nothing.
+	if posts[0].Image != "" {
+		t.Errorf("posted card image = %q, want none from the default components card", posts[0].Image)
 	}
 
 	// The state is what makes the restart below safe: the cursor to resume
@@ -361,6 +360,9 @@ func TestReplayPostsTheLastKill(t *testing.T) {
 	second, secondURL := newFakeWanderer(t, killFrame(secondEventID, killmailJSON(postedKillID+10, false)))
 	vars := testEnv(dir, secondURL)
 	vars[config.EnvReplayChannelID] = testReplayChannelID
+	// The replay renders in its own style, here the strip, which goes out
+	// with blank tiles when the image server has nothing.
+	vars[config.EnvCardStyle] = "strip"
 	logs, codes := runRelay(t, vars, withDiscordBaseURL(discordURL), withESIBaseURL(esi), withImageBaseURL(noImages(t)))
 	if code := wait(t, codes); code != exitOK {
 		t.Fatalf("the replay exited %d, want %d; logs:\n%s", code, exitOK, logs)
@@ -372,6 +374,9 @@ func TestReplayPostsTheLastKill(t *testing.T) {
 	}
 	if want := fmt.Sprintf("https://zkillboard.com/kill/%d/", postedKillID); replays[0].URL != want {
 		t.Errorf("replayed card URL = %q, want %q", replays[0].URL, want)
+	}
+	if replays[0].Image != "attachment://kill.png" {
+		t.Errorf("replayed card image = %q, want the strip, attachment://kill.png", replays[0].Image)
 	}
 	if !hasSystemRow(replays[0], testSystemName) {
 		t.Errorf("replayed card has no System row naming %q:\n%s", testSystemName, replays[0].Text)

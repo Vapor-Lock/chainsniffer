@@ -60,7 +60,7 @@ const (
 	DefaultTopologyResyncInterval = 15 * time.Minute
 	DefaultLogLevel               = slog.LevelInfo
 	DefaultLogFormat              = LogFormatText
-	DefaultCardStyle              = CardStyleStrip
+	DefaultCardStyle              = CardStyleComponents
 )
 
 // LogFormat selects the slog handler the relay logs through.
@@ -83,11 +83,11 @@ const (
 	CardStyleBlock CardStyle = "block"
 	// CardStyleFields shows them as inline embed fields, the older layout.
 	CardStyleFields CardStyle = "fields"
-	// CardStyleStrip is the block card with a rendered PNG strip of the
-	// victim's and the final blow's portraits and logos, the default.
+	// CardStyleStrip is the components card with a rendered PNG strip of
+	// the victim's and the final blow's portraits and logos.
 	CardStyleStrip CardStyle = "strip"
 	// CardStyleComponents posts a Discord Components V2 card instead of an
-	// embed.
+	// embed, the default.
 	CardStyleComponents CardStyle = "components"
 )
 
