@@ -11,10 +11,10 @@ a post.
 ## What Changes
 
 - A new optional setting, `CHAINSNIFFER_KSPACE`, lists the k-space security classes whose kills are
-  relayed, as a comma-separated combination of `high`, `low` and `null`, for example `low,null`.
+  relayed, as a comma-separated combination of `highsec`, `lowsec` and `nullsec`, for example `lowsec,nullsec`.
   The value `none` relays no k-space kills.
 - **BREAKING:** unset (or empty) means `none`. A relay upgraded without setting it stops posting
-  k-space kills and posts wormhole kills only. `CHAINSNIFFER_KSPACE=high,low,null` restores today's
+  k-space kills and posts wormhole kills only. `CHAINSNIFFER_KSPACE=highsec,lowsec,nullsec` restores today's
   behaviour.
 - A k-space system's class comes from its security status: high-sec at 0.45 and above (shown as
   0.5 to 1.0 in game), low-sec above 0.0 and below 0.45, null-sec at 0.0 and below. Pochven and

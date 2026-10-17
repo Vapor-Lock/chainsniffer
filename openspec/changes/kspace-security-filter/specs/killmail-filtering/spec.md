@@ -8,11 +8,11 @@ configured classes, reporting the drop reason `kspace_security`. Killmails in wo
 killmails with no known system, SHALL pass this filter whatever the configuration.
 
 #### Scenario: Class not configured
-- **WHEN** the configured classes are `low,null` and a killmail is in a high-sec system
+- **WHEN** the configured classes are `lowsec,nullsec` and a killmail is in a high-sec system
 - **THEN** it is not posted and the drop reason is `kspace_security`
 
 #### Scenario: Class configured
-- **WHEN** the configured classes are `low,null` and a killmail is in a low-sec system
+- **WHEN** the configured classes are `lowsec,nullsec` and a killmail is in a low-sec system
 - **THEN** it continues through the remaining filters
 
 #### Scenario: No classes configured
@@ -46,7 +46,7 @@ system. The status SHALL be looked up only when the configured classes are some 
 three.
 
 #### Scenario: Security lookup fails
-- **WHEN** the configured classes are `null` and a killmail's known-space system cannot be resolved
+- **WHEN** the configured classes are `nullsec` and a killmail's known-space system cannot be resolved
 - **THEN** it passes the k-space security filter and a warning names the system
 
 #### Scenario: No lookup needed

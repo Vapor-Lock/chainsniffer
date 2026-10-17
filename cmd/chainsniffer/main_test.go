@@ -268,7 +268,7 @@ func TestRelayFiltersKSpace(t *testing.T) {
 		posted bool
 	}{
 		{name: "default", posted: false},
-		{name: "every class", kspace: "high,low,null", posted: true},
+		{name: "every class", kspace: "highsec,lowsec,nullsec", posted: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

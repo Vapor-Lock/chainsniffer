@@ -281,7 +281,7 @@ func TestLoad(t *testing.T) {
 		{
 			name: "k-space classes are trimmed, case insensitive and ordered",
 			setup: func(_ *testing.T, env map[string]string) {
-				env[config.EnvKSpace] = "Null, low"
+				env[config.EnvKSpace] = "Nullsec, lowsec"
 			},
 			check: func(t *testing.T, cfg *config.Config) {
 				want := []config.SecurityClass{config.SecurityLow, config.SecurityNull}
@@ -293,7 +293,7 @@ func TestLoad(t *testing.T) {
 		{
 			name: "k-space duplicates collapse",
 			setup: func(_ *testing.T, env map[string]string) {
-				env[config.EnvKSpace] = "HIGH,high"
+				env[config.EnvKSpace] = "HIGHSEC,highsec"
 			},
 			check: func(t *testing.T, cfg *config.Config) {
 				want := []config.SecurityClass{config.SecurityHigh}
@@ -316,7 +316,7 @@ func TestLoad(t *testing.T) {
 		{
 			name: "k-space every class",
 			setup: func(_ *testing.T, env map[string]string) {
-				env[config.EnvKSpace] = "high,low,null"
+				env[config.EnvKSpace] = "highsec,lowsec,nullsec"
 			},
 			check: func(t *testing.T, cfg *config.Config) {
 				want := []config.SecurityClass{config.SecurityHigh, config.SecurityLow, config.SecurityNull}
@@ -671,17 +671,17 @@ func TestLoadErrors(t *testing.T) {
 		{
 			name: "unknown k-space class",
 			setup: func(_ *testing.T, env map[string]string) {
-				env[config.EnvKSpace] = "low,wormhole"
+				env[config.EnvKSpace] = "lowsec,wormhole"
 			},
-			want:     []string{config.EnvKSpace, "wormhole", "high", "low", "null", "none"},
+			want:     []string{config.EnvKSpace, "wormhole", "highsec", "lowsec", "nullsec", "none"},
 			problems: 1,
 		},
 		{
 			name: "k-space none with a class",
 			setup: func(_ *testing.T, env map[string]string) {
-				env[config.EnvKSpace] = "none,high"
+				env[config.EnvKSpace] = "none,highsec"
 			},
-			want:     []string{config.EnvKSpace, "none,high"},
+			want:     []string{config.EnvKSpace, "none,highsec"},
 			problems: 1,
 		},
 		{
@@ -870,7 +870,7 @@ func TestConfigLogValueIncludesCardStyle(t *testing.T) {
 func TestConfigLogValueIncludesKSpace(t *testing.T) {
 	t.Parallel()
 
-	tests := map[string]string{"": "kspace=none", "none": "kspace=none", "null, HIGH": "kspace=high,null"}
+	tests := map[string]string{"": "kspace=none", "none": "kspace=none", "nullsec, HIGHSEC": "kspace=highsec,nullsec"}
 	for value, want := range tests {
 		t.Run(value, func(t *testing.T) {
 			t.Parallel()

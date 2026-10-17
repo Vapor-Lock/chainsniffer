@@ -20,14 +20,14 @@ empty), `CHAINSNIFFER_FRIENDLY_ONLY` (default `false`), `CHAINSNIFFER_EXCLUDE_NP
 ## ADDED Requirements
 
 ### Requirement: K-space configuration
-The relay SHALL read `CHAINSNIFFER_KSPACE` as `none`, or as a comma-separated combination of `high`,
-`low` and `null`, case-insensitive and ignoring spaces, naming the security classes whose kills are
+The relay SHALL read `CHAINSNIFFER_KSPACE` as `none`, or as a comma-separated combination of `highsec`,
+`lowsec` and `nullsec`, case-insensitive and ignoring spaces, naming the security classes whose kills are
 relayed. Unset or empty SHALL mean `none`. Any other word, or `none` together with a class, SHALL be
 a configuration error that exits with status 2 and names the variable. The startup summary SHALL
 show the classes.
 
 #### Scenario: Two classes
-- **WHEN** `CHAINSNIFFER_KSPACE` is `Low, null`
+- **WHEN** `CHAINSNIFFER_KSPACE` is `Lowsec, nullsec`
 - **THEN** kills in low-sec and null-sec systems are relayed and kills in high-sec systems are not
 
 #### Scenario: Unset
@@ -35,9 +35,9 @@ show the classes.
 - **THEN** no kill in known space is relayed, and the startup summary shows `none`
 
 #### Scenario: Unknown class
-- **WHEN** `CHAINSNIFFER_KSPACE` is `low,wormhole`
+- **WHEN** `CHAINSNIFFER_KSPACE` is `lowsec,wormhole`
 - **THEN** the relay exits with status 2 and names `CHAINSNIFFER_KSPACE`, before connecting anywhere
 
 #### Scenario: None with a class
-- **WHEN** `CHAINSNIFFER_KSPACE` is `none,high`
+- **WHEN** `CHAINSNIFFER_KSPACE` is `none,highsec`
 - **THEN** the relay exits with status 2 and names `CHAINSNIFFER_KSPACE`

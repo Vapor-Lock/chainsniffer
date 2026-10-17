@@ -29,7 +29,7 @@ included), and 32000000 and up are Abyssal pockets, which never appear on a map.
 
 ### The setting is a set of classes, and empty means none
 
-`config` parses `CHAINSNIFFER_KSPACE` into a set of `high`, `low` and `null`, trimmed, lower-cased and
+`config` parses `CHAINSNIFFER_KSPACE` into a set of `highsec`, `lowsec` and `nullsec`, trimmed, lower-cased and
 deduplicated. `none`, unset and empty all give the empty set, which drops every k-space kill.
 `none` beside a class, or any other word, is an error naming the variable, exit 2. The summary logs
 the classes in a fixed order, or `none`. Keeping `none` as a word, rather than only "unset", lets an
@@ -37,7 +37,7 @@ operator write the choice down explicitly in a compose file.
 
 ### K-space is decided by ID, the class by security status
 
-`killmail` gains `SecurityClass` (`high`, `low`, `null`), `IsKSpace(systemID)` (the 30000000 range),
+`killmail` gains `SecurityClass` (`highsec`, `lowsec`, `nullsec`), `IsKSpace(systemID)` (the 30000000 range),
 and `ClassOf(security float64)`: high at 0.45 and up, low above 0.0, null at 0.0 and below. The
 0.45 edge is where the game's display rounding turns a system into 0.5, and anything above 0.0
 shows as at least 0.1. `Filters` gains `KSpace` (the configured set) and
@@ -73,7 +73,7 @@ do not care about security unchanged.
 ## Risks / Trade-offs
 
 - [The default changes] → an upgraded relay stops posting k-space kills. The README's upgrade note
-  and the PR say so, and `CHAINSNIFFER_KSPACE=high,low,null` restores the old behaviour.
+  and the PR say so, and `CHAINSNIFFER_KSPACE=highsec,lowsec,nullsec` restores the old behaviour.
 - [ESI is down while some but not all classes are configured] → kills in an unwanted class can post
   for the length of the outage, each with a warning. The user chose this over losing wanted kills.
 - [A k-space kill now waits for a lookup before filtering] → only for a system not yet cached, and

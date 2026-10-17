@@ -99,9 +99,9 @@ type SecurityClass string
 
 // The known-space security classes, in the order the summary lists them.
 const (
-	SecurityHigh SecurityClass = "high"
-	SecurityLow  SecurityClass = "low"
-	SecurityNull SecurityClass = "null"
+	SecurityHigh SecurityClass = "highsec"
+	SecurityLow  SecurityClass = "lowsec"
+	SecurityNull SecurityClass = "nullsec"
 )
 
 // securityClasses is every class in its fixed order.
@@ -561,7 +561,7 @@ func (l *loader) kspace(name string) []SecurityClass {
 		case kspaceNone:
 			none = true
 		case "":
-			// An empty entry, as in "high,,low", is ignored like idList's.
+			// An empty entry, as in "highsec,,lowsec", is ignored like idList's.
 		default:
 			l.errorf("%s: %q is not a security class (%s, %s, %s or %s)", name, strings.TrimSpace(field),
 				SecurityHigh, SecurityLow, SecurityNull, kspaceNone)

@@ -5,9 +5,9 @@ type SecurityClass string
 
 // The security classes, as CHAINSNIFFER_KSPACE names them.
 const (
-	HighSec SecurityClass = "high"
-	LowSec  SecurityClass = "low"
-	NullSec SecurityClass = "null"
+	HighSec SecurityClass = "highsec"
+	LowSec  SecurityClass = "lowsec"
+	NullSec SecurityClass = "nullsec"
 )
 
 // SecurityClasses lists every class in the order a summary shows them.
