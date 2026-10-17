@@ -41,11 +41,18 @@ const (
 // description (CardStyleBlock), or inline fields (CardStyleFields), the cards
 // the relay posted before the block replaced them. Both share the title, the
 // link, the colour, the thumbnail, the timestamp and the footer.
+//
+// CardStyleStrip and CardStyleComponents are the styles the relay posts as
+// more than one embed: the block card with a portrait strip image, and a
+// Components V2 card. The relay picks their message builders; Render gives
+// both the block embed.
 type CardStyle string
 
 const (
-	CardStyleBlock  CardStyle = "block"
-	CardStyleFields CardStyle = "fields"
+	CardStyleBlock      CardStyle = "block"
+	CardStyleFields     CardStyle = "fields"
+	CardStyleStrip      CardStyle = "strip"
+	CardStyleComponents CardStyle = "components"
 )
 
 // Render turns one classified killmail into the embed the relay posts, laid

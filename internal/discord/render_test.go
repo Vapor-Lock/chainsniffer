@@ -607,10 +607,11 @@ func TestRenderFieldsChainAlias(t *testing.T) {
 	}
 }
 
-// An unknown style renders as the block style, which config makes the default.
+// Every style but fields renders as the block style: strip and components
+// reuse the block embed, and an unknown style falls back to it.
 func TestRenderUnknownStyleIsBlock(t *testing.T) {
 	want := discord.Render(typicalKill(t), killmail.Kill, "J123456", "HOTEL", discord.CardStyleBlock)
-	for _, style := range []discord.CardStyle{"", "tiles"} {
+	for _, style := range []discord.CardStyle{discord.CardStyleStrip, discord.CardStyleComponents, "", "tiles"} {
 		got := discord.Render(typicalKill(t), killmail.Kill, "J123456", "HOTEL", style)
 		if got.Description != want.Description || len(got.Fields) != 0 {
 			t.Errorf("style %q: Description = %q, Fields = %+v, want the block card", style, got.Description, got.Fields)

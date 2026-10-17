@@ -58,7 +58,7 @@ const (
 	DefaultTopologyResyncInterval = 15 * time.Minute
 	DefaultLogLevel               = slog.LevelInfo
 	DefaultLogFormat              = LogFormatText
-	DefaultCardStyle              = CardStyleBlock
+	DefaultCardStyle              = CardStyleStrip
 )
 
 // LogFormat selects the slog handler the relay logs through.
@@ -81,6 +81,12 @@ const (
 	CardStyleBlock CardStyle = "block"
 	// CardStyleFields shows them as inline embed fields, the older layout.
 	CardStyleFields CardStyle = "fields"
+	// CardStyleStrip is the block card with a rendered PNG strip of the
+	// victim's and the final blow's portraits and logos, the default.
+	CardStyleStrip CardStyle = "strip"
+	// CardStyleComponents posts a Discord Components V2 card instead of an
+	// embed.
+	CardStyleComponents CardStyle = "components"
 )
 
 // Config is the relay's effective configuration. It is read once at startup
@@ -484,9 +490,10 @@ func (l *loader) cardStyle(name string) CardStyle {
 		return DefaultCardStyle
 	}
 	switch s := CardStyle(strings.ToLower(v)); s {
-	case CardStyleBlock, CardStyleFields:
+	case CardStyleBlock, CardStyleFields, CardStyleStrip, CardStyleComponents:
 		return s
 	}
-	l.errorf("%s: %q is not a card style (%s or %s)", name, v, CardStyleBlock, CardStyleFields)
+	l.errorf("%s: %q is not a card style (%s, %s, %s or %s)", name, v,
+		CardStyleBlock, CardStyleFields, CardStyleStrip, CardStyleComponents)
 	return DefaultCardStyle
 }

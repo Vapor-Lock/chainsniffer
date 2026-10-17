@@ -77,7 +77,7 @@ func TestLoadMinimal(t *testing.T) {
 		StateDir:               "/var/lib/chainsniffer",
 		LogLevel:               slog.LevelInfo,
 		LogFormat:              config.LogFormatText,
-		CardStyle:              config.CardStyleBlock,
+		CardStyle:              config.CardStyleStrip,
 	}
 	// want leaves both friendly ID slices nil, which is what no configured
 	// friendly IDs has to produce.
@@ -273,6 +273,28 @@ func TestLoad(t *testing.T) {
 			check: func(t *testing.T, cfg *config.Config) {
 				if cfg.CardStyle != config.CardStyleFields {
 					t.Errorf("CardStyle = %q, want fields", cfg.CardStyle)
+				}
+			},
+		},
+		{
+			name: "strip card style",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvCardStyle] = "strip"
+			},
+			check: func(t *testing.T, cfg *config.Config) {
+				if cfg.CardStyle != config.CardStyleStrip {
+					t.Errorf("CardStyle = %q, want strip", cfg.CardStyle)
+				}
+			},
+		},
+		{
+			name: "components card style",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvCardStyle] = "Components"
+			},
+			check: func(t *testing.T, cfg *config.Config) {
+				if cfg.CardStyle != config.CardStyleComponents {
+					t.Errorf("CardStyle = %q, want components", cfg.CardStyle)
 				}
 			},
 		},
@@ -575,7 +597,7 @@ func TestLoadErrors(t *testing.T) {
 			setup: func(_ *testing.T, env map[string]string) {
 				env[config.EnvCardStyle] = "table"
 			},
-			want:     []string{config.EnvCardStyle, "table", "block", "fields"},
+			want:     []string{config.EnvCardStyle, "table", "block", "fields", "strip", "components"},
 			problems: 1,
 		},
 		{
@@ -737,7 +759,7 @@ func TestConfigLogValueIncludesTopology(t *testing.T) {
 func TestConfigLogValueIncludesCardStyle(t *testing.T) {
 	t.Parallel()
 
-	tests := map[string]string{"": "card_style=block", "fields": "card_style=fields"}
+	tests := map[string]string{"": "card_style=strip", "block": "card_style=block", "fields": "card_style=fields"}
 	for value, want := range tests {
 		t.Run(want, func(t *testing.T) {
 			t.Parallel()
