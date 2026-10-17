@@ -355,20 +355,33 @@ func TestRenderClassificationStyling(t *testing.T) {
 	}
 }
 
-// "Uniform card width": a loss, a kill and a neutral kill of one killmail end
-// in the same padding line, and only the neutral one has no footer.
+// "Uniform card width": every classification of a killmail ends in the same
+// padding line, 37 runes when the card has a ship thumbnail and 46 when it has
+// none, and only the neutral one has no footer.
 func TestRenderPadsEveryClassification(t *testing.T) {
-	var want string
-	for _, class := range []killmail.Classification{killmail.Loss, killmail.Kill, killmail.Neutral} {
-		embed := discord.Render(typicalKill(t), class, "Thera", "")
-		pad, _ := padding(t, embed.Description)
-		if want == "" {
-			want = pad
-		} else if pad != want {
-			t.Errorf("%s padding is %d runes, want the same %d runes as a loss", class, len([]rune(pad)), len([]rune(want)))
-		}
-		if class == killmail.Neutral && embed.Footer != nil {
-			t.Errorf("neutral Footer = %+v, want nil", embed.Footer)
+	noShip := typicalKill(t)
+	noShip.Victim.ShipTypeID = 0
+	for _, tc := range []struct {
+		name      string
+		k         killmail.Killmail
+		thumbnail bool
+		want      int
+	}{
+		{"thumbnail", typicalKill(t), true, 37},
+		{"no thumbnail", noShip, false, 46},
+	} {
+		for _, class := range []killmail.Classification{killmail.Loss, killmail.Kill, killmail.Neutral} {
+			embed := discord.Render(tc.k, class, "Thera", "")
+			if (embed.Thumbnail != nil) != tc.thumbnail {
+				t.Fatalf("%s %s: Thumbnail = %+v", tc.name, class, embed.Thumbnail)
+			}
+			pad, _ := padding(t, embed.Description)
+			if got := len([]rune(pad)); got != tc.want {
+				t.Errorf("%s %s padding is %d runes, want %d", tc.name, class, got, tc.want)
+			}
+			if class == killmail.Neutral && embed.Footer != nil {
+				t.Errorf("%s neutral Footer = %+v, want nil", tc.name, embed.Footer)
+			}
 		}
 	}
 }

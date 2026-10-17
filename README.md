@@ -24,7 +24,8 @@ Each killmail becomes an embed:
   a value too long for the 40-column block wraps onto an indented continuation line. Names appear
   literally; a backtick in one is shown as the look-alike `ˋ` so it cannot break the block.
 - **Width:** an invisible line of U+2800 (braille blank) characters under the block makes every
-  card as wide as Discord allows on desktop, so cards stack at one width whatever their content.
+  card nearly as wide as Discord allows on desktop (37 blanks beside a ship thumbnail, 46
+  without), so cards stack at one width whatever their content.
 - **Color and footer:** red `Loss` for a friendly victim, green `Kill` for a friendly final blow,
   and grey with no footer for a neutral in-chain kill.
 - **Timestamp:** the kill time Wanderer reported.

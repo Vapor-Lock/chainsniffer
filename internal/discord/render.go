@@ -49,7 +49,8 @@ const (
 // timestamp and the footer goes in the description as one monospace block of
 // labelled rows (see block), so the rows line up the same way on every card.
 // The description ends in padLine, whatever the classification, so every card
-// is drawn at the same width.
+// is drawn at the same width, its length set by whether the card has a
+// thumbnail.
 //
 // Render is a pure function of its arguments — posting lives elsewhere in this
 // package — so the layout is covered by golden tests. Every field of a
@@ -62,7 +63,7 @@ func Render(k killmail.Killmail, c killmail.Classification, systemName, alias st
 		Title:       title(k.Victim),
 		URL:         fmt.Sprintf(killURL, k.ID),
 		Color:       color(c),
-		Description: join("\n", block(rows(k, system(systemName, alias))), padLine),
+		Description: join("\n", block(rows(k, system(systemName, alias))), padLine(k.Victim.ShipTypeID > 0)),
 	}
 	if k.Victim.ShipTypeID > 0 {
 		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
@@ -187,22 +188,41 @@ const (
 // verbatim.
 var fenceSafe = strings.NewReplacer("`", "\u02cb")
 
-// padRunes is how many U+2800 BRAILLE PATTERN BLANK characters make up
-// padLine. Discord does not trim U+2800 as whitespace and draws it blank,
-// so the line is invisible but has width, and it must be wider than
-// Discord's maximum desktop embed width of about 520px for every card to
-// be drawn at that maximum. The blank is drawn about half an em wide, some
-// 7px in the embed's 14px text, so 80 of them come to roughly 560px. The
-// count errs high on purpose: a run too long only wraps onto a second
-// blank line, while one too short leaves cards ragged. The live check in
-// a Discord channel tunes it.
-const padRunes = 80
+// The padding is a run of U+2800 BRAILLE PATTERN BLANK characters. Discord
+// does not trim U+2800 as whitespace and draws it blank, so the line is
+// invisible but has width, and a run just short of Discord's maximum desktop
+// embed width of about 518px draws every card at nearly that width. A run
+// over the maximum wraps onto further blank lines, a tall band under the
+// card, so the counts aim just under it.
+//
+// Measured in the Discord desktop client, one blank is about 10px, and the
+// text column beside the ship thumbnail is narrower than the full embed: with
+// a thumbnail 36 blanks came to 497px and 37 to 507px, without one 46 came to
+// 504px and 47 to 514px, and none of them wrapped. 37 and 46 draw both kinds
+// of card at about 505px, 3px apart, with about a blank to spare before a
+// wrap. The counts are tuned for the default desktop font scale: a larger
+// scale wraps the padding onto an extra blank line but keeps the full width,
+// and a smaller one draws slightly narrower cards.
+const (
+	// padRunesThumbnail pads a card that shows the victim ship's render.
+	padRunesThumbnail = 37
+
+	// padRunesNoThumbnail pads a card with no thumbnail, whose text runs
+	// the full width of the embed.
+	padRunesNoThumbnail = 46
+)
 
 // padLine ends every description, so that every card, a neutral one included,
-// is padded alike. It goes in the description rather than the footer because
+// is padded alike; how long it is depends only on whether the card has a
+// thumbnail. It goes in the description rather than the footer because
 // Discord draws the timestamp on the footer line, after the footer text, which
 // padding there would push away.
-var padLine = strings.Repeat("\u2800", padRunes)
+func padLine(thumbnail bool) string {
+	if thumbnail {
+		return strings.Repeat("\u2800", padRunesThumbnail)
+	}
+	return strings.Repeat("\u2800", padRunesNoThumbnail)
+}
 
 // block lays the rows out as one code block: each label left-aligned in the
 // label column, its value after it, and every further line of the value,

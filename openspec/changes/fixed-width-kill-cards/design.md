@@ -60,16 +60,23 @@ width; the padding does. The constant is tuned in the live check (see tasks).
 
 ### Uniform width comes from a padding line at the end of the description
 
-The description ends, after the closing fence, with a line of `padRunes` U+2800 BRAILLE PATTERN
-BLANK characters. Discord does not trim U+2800 as whitespace, and it renders blank, so the line is
-invisible but has width. `padRunes` is chosen to exceed the maximum embed width on desktop, so
-every card is drawn at that maximum: nothing else in the embed, the title included, can then make
-a card wider, because Discord wraps everything at the maximum.
+The description ends, after the closing fence, with a line of U+2800 BRAILLE PATTERN BLANK
+characters. Discord does not trim U+2800 as whitespace, and it renders blank, so the line is
+invisible but has width. The run is sized to come just short of the maximum embed width on
+desktop, so every card is drawn at nearly that maximum, and how many blanks that takes depends on
+whether the card has a ship thumbnail, which narrows the text column beside it: 37 with a
+thumbnail (`ShipTypeID > 0`), 46 without.
 
-- Overshooting is safe: an over-long run wraps onto a second blank line, which costs a line of
-  height but keeps the width at the maximum. Undershooting is not, so the constant errs high.
-- Every classification, neutral included, gets the same line, so the neutral card no longer needs
-  a footer to be padded and keeps having none.
+- Measured in the Discord desktop client (the live check): one U+2800 is about 10px and the
+  maximum embed width about 518px. With a thumbnail 36 blanks came to 497px and 37 to 507px;
+  without one 46 came to 504px and 47 to 514px; none of these wrapped. 37 and 46 draw both kinds
+  of card at about 505px, 3px apart, with about one blank to spare before wrapping.
+- Overshooting is not free: the first guess, 80 blanks, wrapped the padding line 3 to 4 times and
+  left a tall blank band under every card. Undershooting leaves cards a little narrower. The
+  counts are tuned for the default desktop font scale: a larger scale wraps the padding onto one
+  extra blank line but keeps the full width, and a smaller one gives slightly narrower cards.
+- Every classification, neutral included, gets the same line for the same thumbnail, so the
+  neutral card no longer needs a footer to be padded and keeps having none.
 - *Alternative:* pad the footer, as first suggested. Rejected: Discord draws the timestamp on the
   footer line after the footer text, so padding there pushes the timestamp off to the right or onto
   a line of its own.
@@ -91,9 +98,10 @@ character limit is far off.
 
 ## Risks / Trade-offs
 
-- [Discord's maximum embed width or its font changes] → `padRunes` errs high, so a wider maximum is
-  the only case that breaks uniformity; the live check documents how the value was chosen, so it is
-  quick to retune.
+- [Discord's maximum embed width or its font changes] → the two padding counts sit about one blank
+  under the measured maximum, so a narrower maximum or wider blank wraps the padding onto an extra
+  blank line and a wider one leaves cards a little short of it; the measurements above record how
+  the values were chosen, so they are quick to retune.
 - [On mobile the 40-column block may be wider than the screen and wrap inside the block] → accepted
   (a non-goal); the rows stay labelled and in order, just less neatly aligned.
 - [Wide characters, such as CJK names, take two columns but count as one rune] → such a line may run
