@@ -55,6 +55,15 @@ falls back to the solar system ID. When the system has a temporary name on the W
 chain alias), the System row or field shows it after the name, e.g. `J134349 (HOTEL)`; a system with no
 temporary name shows the name alone.
 
+Wanderer often sends a corporation or alliance ID without its name or ticker. Those are looked up
+from ESI's public `/corporations/{id}/` and `/alliances/{id}/` endpoints before the card is posted,
+once per ID: corporation and alliance names and tickers do not change in EVE, so every one resolved
+is kept in `names.json` in the state directory and survives a restart. Only IDs the payload carries
+are looked up, so a pilot Wanderer reports without an alliance shows none. A lookup that fails
+within a few seconds leaves that line out, and the kill is posted anyway. `names.json` is a cache
+only and is safe to delete; a corrupt one is moved aside as `names.json.corrupt` and rebuilt. Delete
+it, or the one entry, if CCP ever force-renames a corporation the cache already knows.
+
 ## Setup
 
 ### 1. The Discord bot
@@ -149,7 +158,7 @@ stream connects exits 1, home system or not, as it does for the stream.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `CHAINSNIFFER_STATE_DIR` | `/var/lib/chainsniffer` | Directory holding `state.json`. Must be writable. |
+| `CHAINSNIFFER_STATE_DIR` | `/var/lib/chainsniffer` | Directory holding `state.json` and the `names.json` name cache. Must be writable. |
 | `CHAINSNIFFER_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 | `CHAINSNIFFER_LOG_FORMAT` | `text` | `text` or `json`. |
 | `CHAINSNIFFER_CARD_STYLE` | `block` | Kill card layout: `block` (aligned monospace details, uniform width) or `fields` (inline fields, the older layout). Case-insensitive. |
@@ -291,8 +300,9 @@ nix run .     # with the variables already in the environment
   posted. A system named or renamed afterwards shows its new alias on later kills only.
 - **The bot only writes.** No slash commands, no reading messages, and no map events other than
   kills, connection changes, system deletions and system metadata changes.
-- **No enrichment.** Posts carry what Wanderer sent, plus the system name from ESI. Nothing is
-  fetched from zKillboard or ESI's killmail endpoints.
+- **Little enrichment.** Posts carry what Wanderer sent, plus the system name and any missing
+  corporation and alliance names from ESI. Nothing is fetched from zKillboard or ESI's killmail
+  endpoints.
 
 ## Development
 
@@ -331,8 +341,8 @@ hash mismatch. To update it:
 | `internal/wanderer` | The map stream client: requests, backoff, staleness watchdog, fatal statuses. |
 | `internal/killmail` | Payload decoding, the `Killmail` type, classification, filters. |
 | `internal/discord` | Embed rendering, the poster (rate limits, retries), the startup check. |
-| `internal/universe` | The ESI system-name resolver and its cache. |
-| `internal/state` | `state.json` and the bounded set of posted killmail IDs. |
+| `internal/universe` | The ESI resolver for system, corporation and alliance names, and its caches. |
+| `internal/state` | `state.json` and the bounded set of posted killmail IDs; the `names.json` name cache. |
 | `internal/relay` | The pipeline: event to killmails to filter, dedupe, post, persist. |
 
 The specs this was built from live in `openspec/changes/archive/2026-10-14-add-killmail-relay-bot/`;

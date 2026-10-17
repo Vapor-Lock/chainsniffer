@@ -75,7 +75,7 @@ func withDiscordBaseURL(url string) option {
 	return func(o *options) { o.discordBaseURL = url }
 }
 
-// withESIBaseURL sends the system-name lookups to another ESI root.
+// withESIBaseURL sends the ESI name lookups to another ESI root.
 func withESIBaseURL(url string) option {
 	return func(o *options) { o.esiBaseURL = url }
 }
@@ -179,7 +179,19 @@ func serve(ctx context.Context, logger *slog.Logger, cfg *config.Config, o optio
 		}))
 	relayOpts = append(relayOpts, relay.WithFilters(filters))
 
-	relayer, err := relay.New(poster, newResolver(logger, o), store, relayOpts...)
+	// Corporation and alliance names never change in EVE, so every one the
+	// resolver learns is kept in names.json and asked of ESI once, ever. The
+	// file is a cache only: OpenNames moves a corrupt one aside and starts
+	// empty, and it never touches state.json.
+	names, err := state.OpenNames(cfg.StateDir, state.WithLogger(logger))
+	if err != nil {
+		logger.Error("the state directory is unusable", "dir", cfg.StateDir, "error", err)
+		return exitFailure
+	}
+	resolver := newResolver(logger, o, universe.WithNameCache(names))
+	relayOpts = append(relayOpts, relay.WithAffiliations(resolver))
+
+	relayer, err := relay.New(poster, resolver, store, relayOpts...)
 	if err != nil {
 		logger.Error("cannot build the relay", "error", err)
 		return exitFailure
@@ -323,9 +335,10 @@ func newPoster(cfg *config.Config, logger *slog.Logger, o options) (*discord.Pos
 	return discord.New(cfg.DiscordToken.Reveal(), cfg.DiscordChannelID, opts...)
 }
 
-// newResolver builds the system-name resolver the embeds are named from.
-func newResolver(logger *slog.Logger, o options) *universe.Resolver {
-	opts := []universe.Option{universe.WithLogger(logger)}
+// newResolver builds the ESI resolver the embeds' system, corporation and
+// alliance names come from.
+func newResolver(logger *slog.Logger, o options, extra ...universe.Option) *universe.Resolver {
+	opts := append([]universe.Option{universe.WithLogger(logger)}, extra...)
 	if o.esiBaseURL != "" {
 		opts = append(opts, universe.WithBaseURL(o.esiBaseURL))
 	}

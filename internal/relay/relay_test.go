@@ -11,11 +11,13 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Vapor-Lock/chainsniffer/internal/discord"
 	"github.com/Vapor-Lock/chainsniffer/internal/killmail"
+	"github.com/Vapor-Lock/chainsniffer/internal/universe"
 	"github.com/Vapor-Lock/chainsniffer/internal/wanderer"
 	"github.com/bwmarrin/discordgo"
 )
@@ -755,5 +757,158 @@ func TestHandleRendersTheCardStyle(t *testing.T) {
 				t.Errorf("block card: description %q, %d fields; want a description and no fields", embed.Description, len(embed.Fields))
 			}
 		})
+	}
+}
+
+// fakeAffiliations answers corporations and alliances from fixed tables,
+// failing for an ID it does not know, and records every ID it was asked for.
+type fakeAffiliations struct {
+	corporations map[int64]universe.Entity
+	alliances    map[int64]universe.Entity
+
+	mu    sync.Mutex
+	asked []string
+}
+
+func (a *fakeAffiliations) Corporation(_ context.Context, id int64) (universe.Entity, bool) {
+	return a.lookup("corporation", a.corporations, id)
+}
+
+func (a *fakeAffiliations) Alliance(_ context.Context, id int64) (universe.Entity, bool) {
+	return a.lookup("alliance", a.alliances, id)
+}
+
+func (a *fakeAffiliations) lookup(kind string, table map[int64]universe.Entity, id int64) (universe.Entity, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.asked = append(a.asked, fmt.Sprintf("%s %d", kind, id))
+	e, ok := table[id]
+	return e, ok
+}
+
+// lookups returns the IDs asked for, sorted, since they are asked concurrently.
+func (a *fakeAffiliations) lookups() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Sorted(slices.Values(a.asked))
+}
+
+func newFakeAffiliations() *fakeAffiliations {
+	return &fakeAffiliations{
+		corporations: map[int64]universe.Entity{
+			98735003: {Name: "Final Corporation", Ticker: "FNLC"},
+			98736396: {Name: "Victim Corporation", Ticker: "VCTC"},
+		},
+		alliances: map[int64]universe.Entity{
+			99014747: {Name: "Final Alliance", Ticker: "FNLA"},
+		},
+	}
+}
+
+// "Names missing from the payload": a party with corporation and alliance IDs
+// but no names or tickers shows the resolved ones.
+func TestHandleFillsMissingAffiliationNames(t *testing.T) {
+	affils := newFakeAffiliations()
+	f := newFixture(t, WithAffiliations(affils))
+
+	f.handle(t, envelope(t, "01JB", kill(1, map[string]any{
+		"victim_corp_id":         98736396,
+		"final_blow_char_name":   "Pilot B",
+		"final_blow_ship_name":   "Loki",
+		"final_blow_corp_id":     98735003,
+		"final_blow_alliance_id": 99014747,
+	})))
+
+	desc := f.poster.embeds[0].Description
+	for _, want := range []string{"[VCTC] Victim Corporation", "[FNLC] Final Corporation", "<FNLA> Final Alliance"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("embed lacks %q:\n%s", want, desc)
+		}
+	}
+	want := []string{"alliance 99014747", "corporation 98735003", "corporation 98736396"}
+	if got := affils.lookups(); !slices.Equal(got, want) {
+		t.Errorf("lookups = %v, want %v", got, want)
+	}
+}
+
+// "No alliance in the payload": without an alliance ID none is looked up or
+// shown, even though the corporation is known.
+func TestHandleInfersNoAllianceWithoutAnAllianceID(t *testing.T) {
+	affils := newFakeAffiliations()
+	f := newFixture(t, WithAffiliations(affils))
+
+	f.handle(t, envelope(t, "01JB", kill(1, map[string]any{"victim_corp_id": 98736396})))
+
+	if desc := f.poster.embeds[0].Description; strings.Contains(desc, "<") {
+		t.Errorf("embed shows an alliance for a victim without one:\n%s", desc)
+	}
+	if got, want := affils.lookups(), []string{"corporation 98736396"}; !slices.Equal(got, want) {
+		t.Errorf("lookups = %v, want %v", got, want)
+	}
+}
+
+// "Payload already carries the names": the payload's names are shown and
+// nothing is looked up; a party missing only its ticker has the ticker filled
+// and keeps the payload's name.
+func TestHandleKeepsPayloadAffiliationNames(t *testing.T) {
+	affils := newFakeAffiliations()
+	f := newFixture(t, WithAffiliations(affils))
+
+	f.handle(t, envelope(t, "01JB", kill(1, map[string]any{
+		"victim_corp_id":          98736396,
+		"victim_corp_name":        "Payload Corporation",
+		"victim_corp_ticker":      "PAYC",
+		"victim_alliance_id":      99014747,
+		"victim_alliance_name":    "Payload Alliance",
+		"victim_alliance_ticker":  "PAYA",
+		"final_blow_char_name":    "Pilot B",
+		"final_blow_corp_id":      98735003,
+		"final_blow_corp_name":    "Renamed Corporation",
+		"final_blow_alliance_id":  0,
+		"final_blow_ship_name":    "Loki",
+		"final_blow_ship_type_id": 29990,
+	})))
+
+	desc := f.poster.embeds[0].Description
+	for _, want := range []string{"[PAYC] Payload Corporation", "<PAYA> Payload Alliance", "[FNLC] Renamed Corporation"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("embed lacks %q:\n%s", want, desc)
+		}
+	}
+	if got, want := affils.lookups(), []string{"corporation 98735003"}; !slices.Equal(got, want) {
+		t.Errorf("lookups = %v, want %v", got, want)
+	}
+}
+
+// "Lookup unavailable": a corporation that cannot be resolved is left out,
+// the rest is filled, and the kill is still posted.
+func TestHandlePostsWhenAnAffiliationLookupFails(t *testing.T) {
+	f := newFixture(t, WithAffiliations(newFakeAffiliations()))
+
+	f.handle(t, envelope(t, "01JB", kill(1, map[string]any{
+		"victim_corp_id":         98000001,
+		"final_blow_char_name":   "Pilot B",
+		"final_blow_corp_id":     98735003,
+		"final_blow_alliance_id": 99014747,
+	})))
+
+	wantPosted(t, f, 1)
+	desc := f.poster.embeds[0].Description
+	if strings.Contains(desc, "Victim     ") {
+		t.Errorf("embed has a Victim row for an unresolved corporation:\n%s", desc)
+	}
+	if !strings.Contains(desc, "[FNLC] Final Corporation") {
+		t.Errorf("embed lacks the resolved final blow corporation:\n%s", desc)
+	}
+}
+
+// Without Affiliations the payload is rendered as it came.
+func TestHandleLeavesAffiliationsAloneWithoutAResolver(t *testing.T) {
+	f := newFixture(t)
+
+	f.handle(t, envelope(t, "01JB", kill(1, map[string]any{"victim_corp_id": 98736396})))
+
+	if desc := f.poster.embeds[0].Description; strings.Contains(desc, "Victim     ") {
+		t.Errorf("embed has a Victim row without a resolver:\n%s", desc)
 	}
 }

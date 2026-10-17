@@ -4,7 +4,8 @@
 //
 // Handle is what internal/wanderer calls for every event, in stream order, and
 // it dispatches on the event type. For each killmail a map_kill event carries
-// it skips the ones already posted, applies the filters, resolves the system
+// it skips the ones already posted, applies the filters, fills in the
+// corporation and alliance names the payload left out, resolves the system
 // name and the chain alias, renders the embed and posts it, recording the kill
 // as posted only once Discord has accepted it. A topology event
 // (deleted_system, connection_added, connection_removed,
@@ -31,9 +32,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/Vapor-Lock/chainsniffer/internal/discord"
 	"github.com/Vapor-Lock/chainsniffer/internal/killmail"
+	"github.com/Vapor-Lock/chainsniffer/internal/universe"
 	"github.com/Vapor-Lock/chainsniffer/internal/wanderer"
 )
 
@@ -102,6 +105,20 @@ type Aliases interface {
 	Alias(id int64) string
 }
 
+// Affiliations resolves corporation and alliance IDs to the names and tickers
+// an embed shows, for the parties whose payload carried the ID alone.
+//
+// It is internal/universe's resolver, backed by the names.json cache. A lookup
+// that fails returns false, and the embed leaves that part out.
+type Affiliations interface {
+	Corporation(ctx context.Context, id int64) (universe.Entity, bool)
+	Alliance(ctx context.Context, id int64) (universe.Entity, bool)
+}
+
+// affiliationTimeout bounds all of one kill's affiliation lookups together,
+// which run concurrently, so a cold kill waits about one lookup at most.
+const affiliationTimeout = universe.DefaultTimeout
+
 // Relay is the pipeline. The zero value is not usable; call [New].
 type Relay struct {
 	poster   Poster
@@ -110,6 +127,7 @@ type Relay struct {
 	topology Topology
 	aliases  Aliases
 	style    discord.CardStyle
+	affils   Affiliations
 
 	friendlies killmail.Friendlies
 	filters    killmail.Filters
@@ -121,6 +139,7 @@ type options struct {
 	topology   Topology
 	aliases    Aliases
 	style      discord.CardStyle
+	affils     Affiliations
 	friendlies killmail.Friendlies
 	filters    killmail.Filters
 	logger     *slog.Logger
@@ -158,6 +177,13 @@ func WithAliases(a Aliases) Option {
 // cards use [discord.CardStyleBlock].
 func WithCardStyle(s discord.CardStyle) Option {
 	return func(o *options) { o.style = s }
+}
+
+// WithAffiliations sets where the corporation and alliance names and tickers a
+// payload left out are looked up. Without one, or with a nil one, an embed
+// shows only the names the payload carried.
+func WithAffiliations(a Affiliations) Option {
+	return func(o *options) { o.affils = a }
 }
 
 // WithLogger sets the logger the pipeline reports on. A nil logger keeps
@@ -204,6 +230,7 @@ func New(poster Poster, resolver Resolver, store Store, opts ...Option) (*Relay,
 		topology:   o.topology,
 		aliases:    o.aliases,
 		style:      o.style,
+		affils:     o.affils,
 		friendlies: o.friendlies,
 		filters:    o.filters,
 		logger:     o.logger,
@@ -269,6 +296,9 @@ func (r *Relay) handle(ctx context.Context, k killmail.Killmail) error {
 		return nil
 	}
 
+	// Classification and the filters above judged the payload alone; the
+	// names filled in here are display text only.
+	r.enrich(ctx, &k)
 	name := r.resolver.Name(ctx, k.SolarSystemID)
 	alias := r.alias(k.SolarSystemID)
 	if err := r.poster.Post(ctx, discord.Message{Embed: discord.Render(k, class, name, alias, r.style)}); err != nil {
@@ -297,6 +327,47 @@ func (r *Relay) handle(ctx context.Context, k killmail.Killmail) error {
 	}
 	r.logger.Info("posted killmail", attrs...)
 	return nil
+}
+
+// enrich fills in the corporation and alliance names and tickers that the
+// victim and the final blow carry an ID for but no name or ticker, without an
+// [Affiliations] doing nothing. Only empty fields are filled, and only IDs the
+// payload gives are looked up: an AllianceID of 0 means the pilot had no
+// alliance at kill time, and stays that way. The lookups run concurrently
+// under one context bounded by affiliationTimeout; one that fails leaves its
+// fields empty.
+func (r *Relay) enrich(ctx context.Context, k *killmail.Killmail) {
+	if r.affils == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, affiliationTimeout)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	fill := func(lookup func(context.Context, int64) (universe.Entity, bool), id int64, name, ticker *string) {
+		if id <= 0 || (*name != "" && *ticker != "") {
+			return
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			e, ok := lookup(ctx, id)
+			if !ok {
+				return
+			}
+			if *name == "" {
+				*name = e.Name
+			}
+			if *ticker == "" {
+				*ticker = e.Ticker
+			}
+		}()
+	}
+	for _, p := range []*killmail.Party{&k.Victim, &k.FinalBlow} {
+		fill(r.affils.Corporation, p.CorpID, &p.CorpName, &p.CorpTicker)
+		fill(r.affils.Alliance, p.AllianceID, &p.AllianceName, &p.AllianceTicker)
+	}
+	wg.Wait()
 }
 
 // alias is the chain alias of a solar system, or "" without an [Aliases].
