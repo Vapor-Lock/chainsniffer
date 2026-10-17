@@ -162,6 +162,7 @@ func serve(ctx context.Context, logger *slog.Logger, cfg *config.Config, o optio
 		MinValue:     cfg.MinValue,
 		FriendlyOnly: cfg.FriendlyOnly,
 		MaxKillAge:   cfg.MaxKillAge,
+		KSpace:       kspace(cfg.KSpace),
 	}
 	relayOpts := cardOptions(cfg, logger, o)
 	clientOpts := []wanderer.Option{wanderer.WithLogger(logger)}
@@ -196,7 +197,9 @@ func serve(ctx context.Context, logger *slog.Logger, cfg *config.Config, o optio
 		return exitFailure
 	}
 	resolver := newResolver(logger, o, universe.WithNameCache(names))
-	relayOpts = append(relayOpts, relay.WithAffiliations(resolver))
+	// The resolver that names a kill's system also answers its security
+	// status, from the same cached ESI request.
+	relayOpts = append(relayOpts, relay.WithAffiliations(resolver), relay.WithSecurities(resolver))
 
 	// Every posted kill is kept in last_kill.json, for a test build to replay
 	// (see replay).
@@ -306,6 +309,16 @@ func replay(ctx context.Context, logger *slog.Logger, cfg *config.Config, o opti
 		return exitFailure
 	}
 	return exitOK
+}
+
+// kspace converts the configured security classes into the set the k-space
+// filter reads.
+func kspace(classes []config.SecurityClass) map[killmail.SecurityClass]bool {
+	set := make(map[killmail.SecurityClass]bool, len(classes))
+	for _, c := range classes {
+		set[killmail.SecurityClass(c)] = true
+	}
+	return set
 }
 
 // cardOptions are the relay options that decide how a kill's card looks:
