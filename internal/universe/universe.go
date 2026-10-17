@@ -250,6 +250,7 @@ func (r *Resolver) entity(ctx context.Context, kind, collection string, id int64
 		return Entity{}, false
 	}
 
+	r.logger.Debug("resolved the "+kind+" from ESI", kind+"_id", id, "name", body.Name, "ticker", body.Ticker)
 	r.entities.Put(kind, id, body.Name, body.Ticker)
 	return Entity{Name: body.Name, Ticker: body.Ticker}, true
 }
