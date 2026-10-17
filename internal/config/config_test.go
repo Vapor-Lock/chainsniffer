@@ -77,6 +77,7 @@ func TestLoadMinimal(t *testing.T) {
 		StateDir:               "/var/lib/chainsniffer",
 		LogLevel:               slog.LevelInfo,
 		LogFormat:              config.LogFormatText,
+		CardStyle:              config.CardStyleBlock,
 	}
 	// want leaves both friendly ID slices nil, which is what no configured
 	// friendly IDs has to produce.
@@ -261,6 +262,17 @@ func TestLoad(t *testing.T) {
 				}
 				if cfg.LogFormat != config.LogFormatJSON {
 					t.Errorf("LogFormat = %q, want json", cfg.LogFormat)
+				}
+			},
+		},
+		{
+			name: "card style is case insensitive",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvCardStyle] = "Fields"
+			},
+			check: func(t *testing.T, cfg *config.Config) {
+				if cfg.CardStyle != config.CardStyleFields {
+					t.Errorf("CardStyle = %q, want fields", cfg.CardStyle)
 				}
 			},
 		},
@@ -559,6 +571,14 @@ func TestLoadErrors(t *testing.T) {
 			problems: 1,
 		},
 		{
+			name: "unknown card style",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvCardStyle] = "table"
+			},
+			want:     []string{config.EnvCardStyle, "table", "block", "fields"},
+			problems: 1,
+		},
+		{
 			name: "friendly-only without friendly IDs",
 			setup: func(_ *testing.T, env map[string]string) {
 				env[config.EnvFriendlyOnly] = "true"
@@ -711,6 +731,33 @@ func TestConfigLogValueIncludesTopology(t *testing.T) {
 		if !strings.Contains(line, want) {
 			t.Errorf("log line %q does not contain %q", line, want)
 		}
+	}
+}
+
+func TestConfigLogValueIncludesCardStyle(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{"": "card_style=block", "fields": "card_style=fields"}
+	for value, want := range tests {
+		t.Run(want, func(t *testing.T) {
+			t.Parallel()
+
+			env := baseEnv()
+			if value != "" {
+				env[config.EnvCardStyle] = value
+			}
+			cfg, err := config.Load(lookup(env))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+
+			var buf bytes.Buffer
+			slog.New(slog.NewTextHandler(&buf, nil)).Info("starting", "config", cfg)
+
+			if line := buf.String(); !strings.Contains(line, want) {
+				t.Errorf("log line %q does not contain %q", line, want)
+			}
+		})
 	}
 }
 

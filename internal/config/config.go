@@ -41,6 +41,8 @@ const (
 	EnvStateDir  = "CHAINSNIFFER_STATE_DIR"
 	EnvLogLevel  = "CHAINSNIFFER_LOG_LEVEL"
 	EnvLogFormat = "CHAINSNIFFER_LOG_FORMAT"
+
+	EnvCardStyle = "CHAINSNIFFER_CARD_STYLE"
 )
 
 // FileSuffix marks the companion variable that names a file holding a secret's
@@ -56,6 +58,7 @@ const (
 	DefaultTopologyResyncInterval = 15 * time.Minute
 	DefaultLogLevel               = slog.LevelInfo
 	DefaultLogFormat              = LogFormatText
+	DefaultCardStyle              = CardStyleBlock
 )
 
 // LogFormat selects the slog handler the relay logs through.
@@ -65,6 +68,19 @@ type LogFormat string
 const (
 	LogFormatText LogFormat = "text"
 	LogFormatJSON LogFormat = "json"
+)
+
+// CardStyle selects the layout of the kill cards the relay posts. It mirrors
+// discord.CardStyle, which cmd/chainsniffer converts it to, so that config
+// does not depend on the renderer.
+type CardStyle string
+
+// The supported card styles.
+const (
+	// CardStyleBlock shows the card's rows in one monospace block.
+	CardStyleBlock CardStyle = "block"
+	// CardStyleFields shows them as inline embed fields, the older layout.
+	CardStyleFields CardStyle = "fields"
 )
 
 // Config is the relay's effective configuration. It is read once at startup
@@ -103,6 +119,9 @@ type Config struct {
 	StateDir  string
 	LogLevel  slog.Level
 	LogFormat LogFormat
+
+	// Presentation.
+	CardStyle CardStyle
 }
 
 // LookupFunc resolves an environment variable, reporting whether it is set. It
@@ -143,6 +162,8 @@ func Load(lookup LookupFunc) (*Config, error) {
 		StateDir:  l.optional(EnvStateDir, DefaultStateDir),
 		LogLevel:  l.level(EnvLogLevel),
 		LogFormat: l.logFormat(EnvLogFormat),
+
+		CardStyle: l.cardStyle(EnvCardStyle),
 	}
 
 	// Friendly-only mode drops every neutral killmail, and without friendly
@@ -184,6 +205,7 @@ func (c *Config) LogValue() slog.Value {
 		slog.String("state_dir", c.StateDir),
 		slog.String("log_level", c.LogLevel.String()),
 		slog.String("log_format", string(c.LogFormat)),
+		slog.String("card_style", string(c.CardStyle)),
 	)
 	return slog.GroupValue(attrs...)
 }
@@ -454,4 +476,17 @@ func (l *loader) logFormat(name string) LogFormat {
 	}
 	l.errorf("%s: %q is not a log format (%s or %s)", name, v, LogFormatText, LogFormatJSON)
 	return DefaultLogFormat
+}
+
+func (l *loader) cardStyle(name string) CardStyle {
+	v, ok := l.value(name)
+	if !ok {
+		return DefaultCardStyle
+	}
+	switch s := CardStyle(strings.ToLower(v)); s {
+	case CardStyleBlock, CardStyleFields:
+		return s
+	}
+	l.errorf("%s: %q is not a card style (%s or %s)", name, v, CardStyleBlock, CardStyleFields)
+	return DefaultCardStyle
 }
