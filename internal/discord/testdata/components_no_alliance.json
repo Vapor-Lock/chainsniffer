@@ -1,0 +1,64 @@
+[
+  {
+    "type": 17,
+    "components": [
+      {
+        "type": 9,
+        "components": [
+          {
+            "type": 10,
+            "content": "### [Stratios — Pilot A](https://zkillboard.com/kill/123456789/)"
+          }
+        ],
+        "accessory": {
+          "type": 11,
+          "media": {
+            "url": "https://images.evetech.net/types/33470/render?size=128"
+          }
+        }
+      },
+      {
+        "type": 10,
+        "content": "```\nSystem     J123456\nValue      412.5M ISK\nAttackers  7\nVictim     [CORP] Victim Corporation\nFinal blow Pilot B (Loki)\n           [FRND] Friendly Corporation\n           \u003cBLUE\u003e Friendly Alliance\n```"
+      },
+      {
+        "type": 14
+      },
+      {
+        "type": 9,
+        "components": [
+          {
+            "type": 10,
+            "content": "**Pilot A**\nStratios\n[CORP]"
+          }
+        ],
+        "accessory": {
+          "type": 11,
+          "media": {
+            "url": "https://images.evetech.net/corporations/98123456/logo?size=128"
+          }
+        }
+      },
+      {
+        "type": 9,
+        "components": [
+          {
+            "type": 10,
+            "content": "**Pilot B**\nLoki\n[FRND] / \u003cBLUE\u003e"
+          }
+        ],
+        "accessory": {
+          "type": 11,
+          "media": {
+            "url": "https://images.evetech.net/alliances/99000001/logo?size=128"
+          }
+        }
+      },
+      {
+        "type": 10,
+        "content": "-# Loss · \u003ct:1791916927:f\u003e"
+      }
+    ],
+    "accent_color": 12597547
+  }
+]

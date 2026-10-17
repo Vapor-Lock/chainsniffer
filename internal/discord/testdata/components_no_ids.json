@@ -1,0 +1,27 @@
+[
+  {
+    "type": 17,
+    "components": [
+      {
+        "type": 10,
+        "content": "### [Unknown ship — Unknown pilot](https://zkillboard.com/kill/42/)"
+      },
+      {
+        "type": 14
+      },
+      {
+        "type": 10,
+        "content": "**Unknown pilot**\nUnknown ship"
+      },
+      {
+        "type": 10,
+        "content": "Unknown ship"
+      },
+      {
+        "type": 10,
+        "content": "-# Kill"
+      }
+    ],
+    "accent_color": 2600544
+  }
+]

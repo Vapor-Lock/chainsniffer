@@ -1,0 +1,64 @@
+[
+  {
+    "type": 17,
+    "components": [
+      {
+        "type": 9,
+        "components": [
+          {
+            "type": 10,
+            "content": "### [Stratios — Pilot A](https://zkillboard.com/kill/123456789/)"
+          }
+        ],
+        "accessory": {
+          "type": 11,
+          "media": {
+            "url": "https://images.evetech.net/types/33470/render?size=128"
+          }
+        }
+      },
+      {
+        "type": 10,
+        "content": "```\nSystem     J134349 (HOTEL)\nValue      412.5M ISK\nAttackers  7\nVictim     [CORP] Victim Corporation\n           \u003cVCTM\u003e Victim Alliance\nFinal blow Pilot B (Loki)\n           [FRND] Friendly Corporation\n           \u003cBLUE\u003e Friendly Alliance\n```"
+      },
+      {
+        "type": 14
+      },
+      {
+        "type": 9,
+        "components": [
+          {
+            "type": 10,
+            "content": "**Pilot A**\nStratios\n[CORP] / \u003cVCTM\u003e"
+          }
+        ],
+        "accessory": {
+          "type": 11,
+          "media": {
+            "url": "https://images.evetech.net/alliances/99123456/logo?size=128"
+          }
+        }
+      },
+      {
+        "type": 9,
+        "components": [
+          {
+            "type": 10,
+            "content": "**Pilot B**\nLoki\n[FRND] / \u003cBLUE\u003e"
+          }
+        ],
+        "accessory": {
+          "type": 11,
+          "media": {
+            "url": "https://images.evetech.net/alliances/99000001/logo?size=128"
+          }
+        }
+      },
+      {
+        "type": 10,
+        "content": "-# Kill · \u003ct:1791916927:f\u003e"
+      }
+    ],
+    "accent_color": 2600544
+  }
+]
