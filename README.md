@@ -179,10 +179,11 @@ stream connects exits 1, home system or not, as it does for the stream.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `CHAINSNIFFER_STATE_DIR` | `/var/lib/chainsniffer` | Directory holding `state.json` and the `names.json` name cache. Must be writable. |
+| `CHAINSNIFFER_STATE_DIR` | `/var/lib/chainsniffer` | Directory holding `state.json`, the `names.json` name cache and `last_kill.json`, the last posted kill. Must be writable. |
 | `CHAINSNIFFER_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 | `CHAINSNIFFER_LOG_FORMAT` | `text` | `text` or `json`. |
-| `CHAINSNIFFER_CARD_STYLE` | `strip` | Kill card layout: `strip` (the `block` card with a portrait strip image; needs Attach Files), `block` (aligned monospace details, uniform width), `fields` (inline fields, the older layout) or `components` (a native Discord components card). Case-insensitive. |
+| `CHAINSNIFFER_REPLAY_CHANNEL_ID` | unset | Replay mode: post the last kill saved in the state directory to this channel, then exit. See [Testing a build](#testing-a-build). |
+| `CHAINSNIFFER_CARD_STYLE` | `strip` | Kill card layout: `strip` (the `components` card with a portrait strip image; needs Attach Files), `block` (aligned monospace details, uniform width), `fields` (inline fields, the older layout) or `components` (a native Discord components card). Case-insensitive. |
 
 ### Secrets from files
 
@@ -290,11 +291,29 @@ nix build     # ./result/bin/chainsniffer
 nix run .     # with the variables already in the environment
 ```
 
+### Testing a build
+
+Every kill the relay posts is also saved, with the Wanderer payload it came in, to `last_kill.json`
+in the state directory. Starting a build with `CHAINSNIFFER_REPLAY_CHANNEL_ID` set to a test
+channel's ID puts it in replay mode: it posts that saved kill to the test channel and exits 0. The
+kill is decoded, classified, named and rendered by the build being tested, with its own settings,
+so changing `CHAINSNIFFER_CARD_STYLE` or the friendly IDs shows their effect on a real kill. The
+chain alias comes from the map's current topology.
+
+A replay skips the filters and the duplicate check, never opens the event stream, never posts to
+`CHAINSNIFFER_DISCORD_CHANNEL_ID` and never changes `state.json`. That makes it safe to point at
+the state directory of a relay that is running. The bot needs the same permissions on the test
+channel. With nothing saved yet, the replay exits 1 and says so.
+
+```sh
+CHAINSNIFFER_REPLAY_CHANNEL_ID=<test channel ID> ./result/bin/chainsniffer
+```
+
 ### Exit statuses
 
 | Status | Meaning |
 | --- | --- |
-| 0 | A clean shutdown on `SIGINT` or `SIGTERM`. |
+| 0 | A clean shutdown on `SIGINT` or `SIGTERM`, or a replay that posted. |
 | 1 | A failure needing an operator: a rejected token, a channel the bot cannot post to, a stream or topology request Wanderer refuses, an unusable state directory. |
 | 2 | A configuration the relay refuses to start with. Every bad variable is named on stderr. |
 
@@ -365,7 +384,7 @@ hash mismatch. To update it:
 | `internal/universe` | The ESI resolver for system, corporation and alliance names, and its caches. |
 | `internal/eveimage` | The EVE image server fetcher for portraits and logos, with an in-memory cache. |
 | `internal/cardimage` | Draws the `strip` card's portrait strip PNG. |
-| `internal/state` | `state.json` and the bounded set of posted killmail IDs; the `names.json` name cache. |
+| `internal/state` | `state.json` and the bounded set of posted killmail IDs; the `names.json` name cache; `last_kill.json`. |
 | `internal/relay` | The pipeline: event to killmails to filter, dedupe, post, persist. |
 
 The specs this was built from live in `openspec/changes/archive/2026-10-14-add-killmail-relay-bot/`;

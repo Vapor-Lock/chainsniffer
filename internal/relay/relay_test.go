@@ -1135,3 +1135,84 @@ func TestHandlePostsComponents(t *testing.T) {
 		t.Error("the components card was not recorded as posted")
 	}
 }
+
+// fakeLastKill records every kill saved to it.
+type fakeLastKill struct {
+	ids      []int64
+	payloads []json.RawMessage
+}
+
+func (l *fakeLastKill) Save(id int64, payload json.RawMessage) {
+	l.ids = append(l.ids, id)
+	l.payloads = append(l.payloads, payload)
+}
+
+// Every posted kill is saved with the payload it arrived in; a filtered kill,
+// a duplicate and a kill Discord refused are not.
+func TestHandleSavesThePostedKill(t *testing.T) {
+	last := &fakeLastKill{}
+	f := newFixture(t, WithLastKill(last), WithFilters(killmail.Filters{ExcludeNPC: true}))
+	f.store.MarkPosted(3)
+	f.poster.fail = func(call int) error {
+		if call == 2 {
+			return &discord.GaveUpError{Attempts: 7, Err: errors.New("502 Bad Gateway")}
+		}
+		return nil
+	}
+
+	env := envelope(t, "01JB", kill(1), kill(2), kill(3), kill(4, map[string]any{"npc": true}), kill(5))
+	f.handle(t, env)
+
+	if want := []int64{1, 5}; !slices.Equal(last.ids, want) {
+		t.Errorf("saved kills = %v, want %v", last.ids, want)
+	}
+	for i, p := range last.payloads {
+		if string(p) != string(env.Payload) {
+			t.Errorf("saved payload %d = %s, want the event's %s", i, p, env.Payload)
+		}
+	}
+}
+
+// A replay posts the saved kill past the dedupe and the filters, and leaves
+// the store and the last kill as they were.
+func TestReplayPostsTheSavedKill(t *testing.T) {
+	last := &fakeLastKill{}
+	f := newFixture(t, WithLastKill(last), WithFilters(killmail.Filters{ExcludeNPC: true}))
+	f.store.MarkPosted(2)
+	payload := envelope(t, "01JB", kill(1), kill(2, map[string]any{"npc": true})).Payload
+
+	if err := f.relay.Replay(context.Background(), 2, payload); err != nil {
+		t.Fatalf("Replay() = %v", err)
+	}
+
+	wantPosted(t, f, 2)
+	if f.store.lastEventID != "" || len(f.store.saves) != 0 || len(f.store.posted) != 1 {
+		t.Errorf("store = cursor %q, %d saves, posted %v; want it untouched", f.store.lastEventID, len(f.store.saves), f.store.posted)
+	}
+	if len(last.ids) != 0 {
+		t.Errorf("saved kills = %v, want none for a replay", last.ids)
+	}
+	if !strings.Contains(f.logs.String(), `msg="replayed killmail" killmail_id=2`) {
+		t.Errorf("logs do not report the replay:\n%s", f.logs)
+	}
+}
+
+func TestReplayFailures(t *testing.T) {
+	payload := envelope(t, "01JB", kill(1)).Payload
+
+	t.Run("killmail not in the payload", func(t *testing.T) {
+		f := newFixture(t)
+		if err := f.relay.Replay(context.Background(), 9, payload); err == nil {
+			t.Error("Replay() = nil, want an error naming the missing killmail")
+		}
+		wantPosted(t, f)
+	})
+	t.Run("post refused", func(t *testing.T) {
+		f := newFixture(t)
+		refused := errors.New("403 Missing Permissions")
+		f.poster.fail = func(int) error { return refused }
+		if err := f.relay.Replay(context.Background(), 1, payload); !errors.Is(err, refused) {
+			t.Errorf("Replay() = %v, want the post's error", err)
+		}
+	})
+}

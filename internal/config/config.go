@@ -43,6 +43,8 @@ const (
 	EnvLogFormat = "CHAINSNIFFER_LOG_FORMAT"
 
 	EnvCardStyle = "CHAINSNIFFER_CARD_STYLE"
+
+	EnvReplayChannelID = "CHAINSNIFFER_REPLAY_CHANNEL_ID"
 )
 
 // FileSuffix marks the companion variable that names a file holding a secret's
@@ -128,6 +130,10 @@ type Config struct {
 
 	// Presentation.
 	CardStyle CardStyle
+
+	// Testing. ReplayChannelID, when set, makes the process post the last
+	// kill it saved to this channel and exit, instead of relaying.
+	ReplayChannelID string
 }
 
 // LookupFunc resolves an environment variable, reporting whether it is set. It
@@ -170,6 +176,8 @@ func Load(lookup LookupFunc) (*Config, error) {
 		LogFormat: l.logFormat(EnvLogFormat),
 
 		CardStyle: l.cardStyle(EnvCardStyle),
+
+		ReplayChannelID: l.optionalSnowflake(EnvReplayChannelID),
 	}
 
 	// Friendly-only mode drops every neutral killmail, and without friendly
@@ -213,6 +221,9 @@ func (c *Config) LogValue() slog.Value {
 		slog.String("log_format", string(c.LogFormat)),
 		slog.String("card_style", string(c.CardStyle)),
 	)
+	if c.ReplayChannelID != "" {
+		attrs = append(attrs, slog.String("replay_channel_id", c.ReplayChannelID))
+	}
 	return slog.GroupValue(attrs...)
 }
 
@@ -317,6 +328,15 @@ func (l *loader) snowflake(name string) string {
 		return ""
 	}
 	return v
+}
+
+// optionalSnowflake is snowflake for a variable that may be unset, which
+// leaves it empty.
+func (l *loader) optionalSnowflake(name string) string {
+	if _, ok := l.value(name); !ok {
+		return ""
+	}
+	return l.snowflake(name)
 }
 
 // secret reads a secret from name, or from the file named by its _FILE

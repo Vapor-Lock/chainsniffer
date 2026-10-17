@@ -36,8 +36,10 @@ const (
 	testWandererToken = "wanderer-public-api-key-ssshh"
 	testDiscordToken  = "discord-bot-token-ssshh"
 	testChannelID     = "123456789012345678"
-	testGuildID       = "876543210987654321"
-	testBotID         = "111111111111111111"
+	// testReplayChannelID is the test channel a replay posts to.
+	testReplayChannelID = "223456789012345678"
+	testGuildID         = "876543210987654321"
+	testBotID           = "111111111111111111"
 
 	// testCorpID is the victim's corporation, configured as friendly, which
 	// makes every posted kill a loss.
@@ -329,6 +331,82 @@ func TestRelayShowsTheChainAlias(t *testing.T) {
 				t.Error("the relay never requested /systems")
 			}
 		})
+	}
+}
+
+// TestReplayPostsTheLastKill covers relay-runtime's "Replay the last kill": a
+// relay saves the kill it posts, and a run with the replay channel set posts
+// that kill there and exits 0 without touching the stream, the relay's
+// channel or state.json.
+func TestReplayPostsTheLastKill(t *testing.T) {
+	dir := t.TempDir()
+	esi := newFakeESI(t)
+	discordFake, discordURL := newFakeDiscord(t)
+	_, firstURL := newFakeWanderer(t, killFrame(firstEventID, killmailJSON(postedKillID, false)))
+
+	_, stop := startRelay(t, testEnv(dir, firstURL), withDiscordBaseURL(discordURL), withESIBaseURL(esi), withImageBaseURL(noImages(t)))
+	waitFor(t, "the first event to be recorded", func() bool {
+		return readState(t, dir).LastEventID == firstEventID
+	})
+	if code := stop(); code != exitOK {
+		t.Fatalf("the relay exited %d, want %d", code, exitOK)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, state.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The replay's Wanderer has a new kill on its stream, which must not be
+	// read, let alone posted.
+	second, secondURL := newFakeWanderer(t, killFrame(secondEventID, killmailJSON(postedKillID+10, false)))
+	vars := testEnv(dir, secondURL)
+	vars[config.EnvReplayChannelID] = testReplayChannelID
+	logs, codes := runRelay(t, vars, withDiscordBaseURL(discordURL), withESIBaseURL(esi), withImageBaseURL(noImages(t)))
+	if code := wait(t, codes); code != exitOK {
+		t.Fatalf("the replay exited %d, want %d; logs:\n%s", code, exitOK, logs)
+	}
+
+	replays := discordFake.replayed()
+	if len(replays) != 1 {
+		t.Fatalf("the replay channel received %d posts, want 1; logs:\n%s", len(replays), logs)
+	}
+	if want := fmt.Sprintf("https://zkillboard.com/kill/%d/", postedKillID); replays[0].URL != want {
+		t.Errorf("replayed card URL = %q, want %q", replays[0].URL, want)
+	}
+	if !hasSystemRow(replays[0], testSystemName) {
+		t.Errorf("replayed card has no System row naming %q:\n%s", testSystemName, replays[0].Text)
+	}
+	if got := len(discordFake.posted()); got != 1 {
+		t.Errorf("the relay's channel received %d posts, want only the first run's 1", got)
+	}
+	if got := second.queries(); len(got) != 0 {
+		t.Errorf("the replay opened the event stream %d times, want never", len(got))
+	}
+	after, err := os.ReadFile(filepath.Join(dir, state.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("state.json changed from %s to %s", before, after)
+	}
+}
+
+// A replay with nothing saved exits 1 and says why.
+func TestReplayWithoutASavedKill(t *testing.T) {
+	discordFake, discordURL := newFakeDiscord(t)
+	_, wandererURL := newFakeWanderer(t, "")
+	vars := testEnv(t.TempDir(), wandererURL)
+	vars[config.EnvReplayChannelID] = testReplayChannelID
+
+	logs, codes := runRelay(t, vars, withDiscordBaseURL(discordURL), withESIBaseURL(newFakeESI(t)))
+	if code := wait(t, codes); code != exitFailure {
+		t.Errorf("the replay exited %d, want %d", code, exitFailure)
+	}
+	if !strings.Contains(logs.String(), "there is no kill to replay") {
+		t.Errorf("logs do not say there is nothing to replay:\n%s", logs)
+	}
+	if got := len(discordFake.replayed()); got != 0 {
+		t.Errorf("the replay channel received %d posts, want 0", got)
 	}
 }
 
@@ -912,9 +990,10 @@ type fakeDiscord struct {
 	// this fake's own gateway handler.
 	gatewayURL string
 
-	mu    sync.Mutex
-	posts []post
-	conns []net.Conn
+	mu      sync.Mutex
+	posts   []post
+	replays []post // the posts to testReplayChannelID
+	conns   []net.Conn
 }
 
 // newFakeDiscord returns a fake that accepts everything, and the API root to
@@ -959,9 +1038,10 @@ func (f *fakeDiscord) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, &discordgo.User{ID: testBotID, Username: "chainsniffer", Bot: true})
 
-	case r.Method == http.MethodGet && path == "channels/"+testChannelID:
+	case r.Method == http.MethodGet && (path == "channels/"+testChannelID || path == "channels/"+testReplayChannelID):
+		id := strings.TrimPrefix(path, "channels/")
 		writeJSON(w, http.StatusOK, &discordgo.Channel{
-			ID: testChannelID, Name: "killmails", GuildID: testGuildID, Type: discordgo.ChannelTypeGuildText,
+			ID: id, Name: "killmails", GuildID: testGuildID, Type: discordgo.ChannelTypeGuildText,
 		})
 
 	case r.Method == http.MethodGet && path == "guilds/"+testGuildID:
@@ -978,7 +1058,10 @@ func (f *fakeDiscord) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, &discordgo.Member{GuildID: testGuildID, User: &discordgo.User{ID: testBotID}})
 
 	case r.Method == http.MethodPost && path == "channels/"+testChannelID+"/messages":
-		f.handlePost(w, r)
+		f.handlePost(w, r, &f.posts)
+
+	case r.Method == http.MethodPost && path == "channels/"+testReplayChannelID+"/messages":
+		f.handlePost(w, r, &f.replays)
 
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]any{"message": "404: Not Found"})
@@ -1030,7 +1113,7 @@ func readPost(embeds []*discordgo.MessageEmbed, components []discord.Component) 
 
 // handlePost accepts one message, recording the card it carried. A message
 // with files, the strip card's, is multipart with its JSON in payload_json.
-func (f *fakeDiscord) handlePost(w http.ResponseWriter, r *http.Request) {
+func (f *fakeDiscord) handlePost(w http.ResponseWriter, r *http.Request, into *[]post) {
 	var sent struct {
 		Embeds     []*discordgo.MessageEmbed `json:"embeds"`
 		Components []discord.Component       `json:"components"`
@@ -1053,9 +1136,16 @@ func (f *fakeDiscord) handlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.mu.Lock()
-	f.posts = append(f.posts, card)
+	*into = append(*into, card)
 	f.mu.Unlock()
 	writeJSON(w, http.StatusCreated, &discordgo.Message{ID: "999", ChannelID: testChannelID, Embeds: sent.Embeds})
+}
+
+// replayed returns the cards the fake accepted in the replay channel, in order.
+func (f *fakeDiscord) replayed() []post {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]post(nil), f.replays...)
 }
 
 // posted returns the cards the fake accepted, in order.

@@ -132,6 +132,15 @@ type Images interface {
 	Fetch(ctx context.Context, url string) (image.Image, bool)
 }
 
+// LastKill keeps the last kill the relay posted, with the payload it arrived
+// in, for a later build to replay to a test channel (see [Relay.Replay]).
+//
+// It is internal/state's last-kill file. Save logs and swallows its own
+// failures: the file only serves replays and never fails a post.
+type LastKill interface {
+	Save(killmailID int64, payload json.RawMessage)
+}
+
 // The sizes the strip's images are fetched at: the portrait and logo tiles
 // cardimage draws them into.
 const (
@@ -158,6 +167,7 @@ type Relay struct {
 	style    discord.CardStyle
 	affils   Affiliations
 	images   Images
+	lastKill LastKill
 
 	friendlies killmail.Friendlies
 	filters    killmail.Filters
@@ -173,6 +183,7 @@ type options struct {
 	style      discord.CardStyle
 	affils     Affiliations
 	images     Images
+	lastKill   LastKill
 	friendlies killmail.Friendlies
 	filters    killmail.Filters
 	logger     *slog.Logger
@@ -225,6 +236,12 @@ func WithImages(i Images) Option {
 	return func(o *options) { o.images = i }
 }
 
+// WithLastKill sets where every posted kill is saved for [Relay.Replay].
+// Without one, or with a nil one, nothing is saved.
+func WithLastKill(l LastKill) Option {
+	return func(o *options) { o.lastKill = l }
+}
+
 // WithLogger sets the logger the pipeline reports on. A nil logger keeps
 // slog.Default.
 func WithLogger(l *slog.Logger) Option {
@@ -271,6 +288,7 @@ func New(poster Poster, resolver Resolver, store Store, opts ...Option) (*Relay,
 		style:      o.style,
 		affils:     o.affils,
 		images:     o.images,
+		lastKill:   o.lastKill,
 		friendlies: o.friendlies,
 		filters:    o.filters,
 		logger:     o.logger,
@@ -300,7 +318,7 @@ func (r *Relay) Handle(ctx context.Context, env wanderer.Envelope) error {
 	switch env.Type {
 	case killmail.EventMapKill:
 		for _, k := range killmail.Extract(env.Payload, r.logger) {
-			if err := r.handle(ctx, k); err != nil {
+			if err := r.handle(ctx, k, env.Payload); err != nil {
 				return err
 			}
 		}
@@ -320,8 +338,9 @@ func (r *Relay) Handle(ctx context.Context, env wanderer.Envelope) error {
 	return nil
 }
 
-// handle runs one killmail through dedupe, the filters and Discord.
-func (r *Relay) handle(ctx context.Context, k killmail.Killmail) error {
+// handle runs one killmail through dedupe, the filters and Discord. payload is
+// the event payload k was decoded from, which is saved with it once posted.
+func (r *Relay) handle(ctx context.Context, k killmail.Killmail, payload json.RawMessage) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -339,10 +358,8 @@ func (r *Relay) handle(ctx context.Context, k killmail.Killmail) error {
 
 	// Classification and the filters above judged the payload alone; the
 	// names filled in here are display text only.
-	r.enrich(ctx, &k)
-	name := r.resolver.Name(ctx, k.SolarSystemID)
-	alias := r.alias(k.SolarSystemID)
-	if err := r.poster.Post(ctx, r.message(ctx, k, class, name, alias)); err != nil {
+	msg, name, alias := r.card(ctx, k, class)
+	if err := r.poster.Post(ctx, msg); err != nil {
 		switch {
 		case ctx.Err() != nil:
 			// A post torn down by shutdown is not a post Discord refused, and
@@ -362,12 +379,52 @@ func (r *Relay) handle(ctx context.Context, k killmail.Killmail) error {
 
 	// Only now, with Discord's acceptance in hand, is the kill a duplicate.
 	r.store.MarkPosted(k.ID)
+	if r.lastKill != nil {
+		r.lastKill.Save(k.ID, payload)
+	}
 	attrs := []any{"killmail_id", k.ID, "classification", string(class), "solar_system", name}
 	if alias != "" {
 		attrs = append(attrs, "chain_alias", alias)
 	}
 	r.logger.Info("posted killmail", attrs...)
 	return nil
+}
+
+// Replay posts killmail id from payload, a saved kill's (see [LastKill]),
+// once more: classified, enriched, named and rendered in the configured style
+// as a live kill is, but past the dedupe and the filters, and without marking
+// it posted, saving it or touching the cursor. It is for showing what a build
+// makes of a known kill in a test channel.
+//
+// It returns an error when payload holds no killmail id, or when the post
+// fails.
+func (r *Relay) Replay(ctx context.Context, id int64, payload json.RawMessage) error {
+	for _, k := range killmail.Extract(payload, r.logger) {
+		if k.ID != id {
+			continue
+		}
+		class := r.friendlies.Classify(k)
+		msg, name, alias := r.card(ctx, k, class)
+		if err := r.poster.Post(ctx, msg); err != nil {
+			return fmt.Errorf("relay: replaying killmail %d: %w", id, err)
+		}
+		attrs := []any{"killmail_id", k.ID, "classification", string(class), "solar_system", name}
+		if alias != "" {
+			attrs = append(attrs, "chain_alias", alias)
+		}
+		r.logger.Info("replayed killmail", attrs...)
+		return nil
+	}
+	return fmt.Errorf("relay: the saved payload holds no killmail %d", id)
+}
+
+// card fills in k's missing names, resolves its system name and chain alias,
+// and builds its card, returning the name and alias for the log line.
+func (r *Relay) card(ctx context.Context, k killmail.Killmail, class killmail.Classification) (discord.Message, string, string) {
+	r.enrich(ctx, &k)
+	name := r.resolver.Name(ctx, k.SolarSystemID)
+	alias := r.alias(k.SolarSystemID)
+	return r.message(ctx, k, class, name, alias), name, alias
 }
 
 // message builds the card for one kill in the configured style.

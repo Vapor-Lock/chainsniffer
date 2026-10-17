@@ -109,6 +109,9 @@ func run(ctx context.Context, stderr io.Writer, lookup config.LookupFunc, opts .
 	// themselves as "[redacted]" through slog.LogValuer.
 	logger.Info("starting chainsniffer", "version", version, "config", cfg)
 
+	if cfg.ReplayChannelID != "" {
+		return replay(ctx, logger, cfg, o)
+	}
 	return serve(ctx, logger, cfg, o)
 }
 
@@ -137,7 +140,7 @@ func serve(ctx context.Context, logger *slog.Logger, cfg *config.Config, o optio
 	defer close(stopped)
 	go grace(ctx, streamCtx, stopped, cancelPosts, logger)
 
-	poster, err := newPoster(cfg, logger, o)
+	poster, err := newPoster(cfg, cfg.DiscordChannelID, logger, o)
 	if err != nil {
 		logger.Error("cannot build the Discord client", "error", err)
 		return exitFailure
@@ -160,14 +163,7 @@ func serve(ctx context.Context, logger *slog.Logger, cfg *config.Config, o optio
 		FriendlyOnly: cfg.FriendlyOnly,
 		MaxKillAge:   cfg.MaxKillAge,
 	}
-	relayOpts := []relay.Option{
-		relay.WithFriendlies(killmail.NewFriendlies(cfg.FriendlyCorpIDs, cfg.FriendlyAllianceIDs)),
-		relay.WithCardStyle(discord.CardStyle(cfg.CardStyle)),
-		relay.WithLogger(logger),
-	}
-	if cfg.CardStyle == config.CardStyleStrip {
-		relayOpts = append(relayOpts, relay.WithImages(newImages(logger, o)))
-	}
+	relayOpts := cardOptions(cfg, logger, o)
 	clientOpts := []wanderer.Option{wanderer.WithLogger(logger)}
 
 	// The topology is always followed, since it is where the chain aliases
@@ -202,6 +198,15 @@ func serve(ctx context.Context, logger *slog.Logger, cfg *config.Config, o optio
 	resolver := newResolver(logger, o, universe.WithNameCache(names))
 	relayOpts = append(relayOpts, relay.WithAffiliations(resolver))
 
+	// Every posted kill is kept in last_kill.json, for a test build to replay
+	// (see replay).
+	lastKill, err := state.OpenLastKill(cfg.StateDir, state.WithLogger(logger))
+	if err != nil {
+		logger.Error("the state directory is unusable", "dir", cfg.StateDir, "error", err)
+		return exitFailure
+	}
+	relayOpts = append(relayOpts, relay.WithLastKill(lastKill))
+
 	relayer, err := relay.New(poster, resolver, store, relayOpts...)
 	if err != nil {
 		logger.Error("cannot build the relay", "error", err)
@@ -229,6 +234,92 @@ func serve(ctx context.Context, logger *slog.Logger, cfg *config.Config, o optio
 	// store.LastEventID is read before every connection attempt, so a
 	// reconnect resumes from the newest event the relay has finished.
 	return stop(logger, store, streamCtx, client.Run(streamCtx, store.LastEventID, relayer.Handler(postCtx)))
+}
+
+// replay posts the last kill a relay saved in the state directory to the
+// replay channel, built the way this build builds a live kill's card, and
+// reports how that went. It never subscribes to the stream, posts to the
+// relay's channel or changes state.json, so it is safe beside a running relay
+// on the same state directory.
+func replay(ctx context.Context, logger *slog.Logger, cfg *config.Config, o options) int {
+	ctx, stopSignals := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
+	lastKill, err := state.OpenLastKill(cfg.StateDir, state.WithLogger(logger))
+	if err != nil {
+		logger.Error("the state directory is unusable", "dir", cfg.StateDir, "error", err)
+		return exitFailure
+	}
+	saved, err := lastKill.Load()
+	if err != nil {
+		logger.Error("there is no kill to replay", "error", err)
+		return exitFailure
+	}
+	// The relay needs a store, but Replay never reads or writes it.
+	store, err := state.Open(cfg.StateDir, state.WithLogger(logger))
+	if err != nil {
+		logger.Error("the state directory is unusable", "dir", cfg.StateDir, "error", err)
+		return exitFailure
+	}
+	names, err := state.OpenNames(cfg.StateDir, state.WithLogger(logger))
+	if err != nil {
+		logger.Error("the state directory is unusable", "dir", cfg.StateDir, "error", err)
+		return exitFailure
+	}
+
+	poster, err := newPoster(cfg, cfg.ReplayChannelID, logger, o)
+	if err != nil {
+		logger.Error("cannot build the Discord client", "error", err)
+		return exitFailure
+	}
+	defer func() {
+		if err := poster.Close(); err != nil {
+			logger.Warn("closing the Discord session failed", "error", err)
+		}
+	}()
+	if err := poster.Startup(ctx); err != nil {
+		logger.Error("the Discord startup check failed", "error", err)
+		return exitFailure
+	}
+
+	// The chain alias comes from the map's current topology, loaded once. A
+	// map that cannot be read only costs the alias.
+	graph := topology.New(cfg.HomeSystemID, topology.WithLogger(logger))
+	client, err := wanderer.New(cfg.WandererURL, cfg.WandererMap, cfg.WandererToken.Reveal(), wanderer.WithLogger(logger))
+	if err != nil {
+		logger.Error("cannot build the Wanderer client", "error", err)
+		return exitFailure
+	}
+	if err := graph.Resync(ctx, snapshotFetcher(client)); err != nil {
+		logger.Warn("loading the map topology failed, replaying without a chain alias", "error", err)
+	}
+
+	resolver := newResolver(logger, o, universe.WithNameCache(names))
+	relayer, err := relay.New(poster, resolver, store, append(cardOptions(cfg, logger, o),
+		relay.WithAliases(graph), relay.WithAffiliations(resolver))...)
+	if err != nil {
+		logger.Error("cannot build the relay", "error", err)
+		return exitFailure
+	}
+	if err := relayer.Replay(ctx, saved.KillmailID, saved.Payload); err != nil {
+		logger.Error("the replay failed", "error", err)
+		return exitFailure
+	}
+	return exitOK
+}
+
+// cardOptions are the relay options that decide how a kill's card looks:
+// its classification, its style, and for the strip style its images.
+func cardOptions(cfg *config.Config, logger *slog.Logger, o options) []relay.Option {
+	opts := []relay.Option{
+		relay.WithFriendlies(killmail.NewFriendlies(cfg.FriendlyCorpIDs, cfg.FriendlyAllianceIDs)),
+		relay.WithCardStyle(discord.CardStyle(cfg.CardStyle)),
+		relay.WithLogger(logger),
+	}
+	if cfg.CardStyle == config.CardStyleStrip {
+		opts = append(opts, relay.WithImages(newImages(logger, o)))
+	}
+	return opts
 }
 
 // snapshotFetcher loads the map's topology and chain aliases through client, in the shape the
@@ -337,8 +428,8 @@ func newLogger(w io.Writer, cfg *config.Config) *slog.Logger {
 	return slog.New(slog.NewTextHandler(w, opts))
 }
 
-// newPoster builds the Discord poster the relay posts through.
-func newPoster(cfg *config.Config, logger *slog.Logger, o options) (*discord.Poster, error) {
+// newPoster builds the Discord poster that posts to channelID.
+func newPoster(cfg *config.Config, channelID string, logger *slog.Logger, o options) (*discord.Poster, error) {
 	// Only the strip style uploads a file, so only it needs Attach Files.
 	opts := []discord.Option{
 		discord.WithLogger(logger),
@@ -347,7 +438,7 @@ func newPoster(cfg *config.Config, logger *slog.Logger, o options) (*discord.Pos
 	if o.discordBaseURL != "" {
 		opts = append(opts, discord.WithBaseURL(o.discordBaseURL))
 	}
-	return discord.New(cfg.DiscordToken.Reveal(), cfg.DiscordChannelID, opts...)
+	return discord.New(cfg.DiscordToken.Reveal(), channelID, opts...)
 }
 
 // newResolver builds the ESI resolver the embeds' system, corporation and

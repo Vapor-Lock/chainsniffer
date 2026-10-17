@@ -95,6 +95,17 @@ func TestLoad(t *testing.T) {
 		check func(t *testing.T, cfg *config.Config)
 	}{
 		{
+			name: "replay channel",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvReplayChannelID] = " 1560738628290875472 "
+			},
+			check: func(t *testing.T, cfg *config.Config) {
+				if cfg.ReplayChannelID != "1560738628290875472" {
+					t.Errorf("ReplayChannelID = %q", cfg.ReplayChannelID)
+				}
+			},
+		},
+		{
 			name: "trailing slashes stripped from the Wanderer URL",
 			setup: func(_ *testing.T, env map[string]string) {
 				env[config.EnvWandererURL] = "http://localhost:8080//"
@@ -423,6 +434,14 @@ func TestLoadErrors(t *testing.T) {
 				env[config.EnvWandererURL] = "ftp://wanderer.example"
 			},
 			want:     []string{config.EnvWandererURL, "http"},
+			problems: 1,
+		},
+		{
+			name: "replay channel ID that is not a snowflake",
+			setup: func(_ *testing.T, env map[string]string) {
+				env[config.EnvReplayChannelID] = "#test"
+			},
+			want:     []string{config.EnvReplayChannelID, "#test"},
 			problems: 1,
 		},
 		{
@@ -797,6 +816,9 @@ func TestConfigLogValueOmitsUnsetHomeSystem(t *testing.T) {
 	line := buf.String()
 	if strings.Contains(line, "home_system_id") {
 		t.Errorf("log line %q mentions home_system_id without a home system", line)
+	}
+	if strings.Contains(line, "replay_channel_id") {
+		t.Errorf("log line %q mentions replay_channel_id without a replay channel", line)
 	}
 	if !strings.Contains(line, "topology_resync_interval=15m0s") {
 		t.Errorf("log line %q does not contain the resync interval", line)
