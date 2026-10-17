@@ -154,6 +154,7 @@ func serve(ctx context.Context, logger *slog.Logger, cfg *config.Config, o optio
 	}
 	relayOpts := []relay.Option{
 		relay.WithFriendlies(killmail.NewFriendlies(cfg.FriendlyCorpIDs, cfg.FriendlyAllianceIDs)),
+		relay.WithCardStyle(discord.CardStyle(cfg.CardStyle)),
 		relay.WithLogger(logger),
 	}
 	clientOpts := []wanderer.Option{wanderer.WithLogger(logger)}

@@ -13,24 +13,31 @@ One process serves one map and one channel.
 
 ## What a post looks like
 
-Each killmail becomes an embed:
+Each killmail becomes an embed, in one of two card styles chosen by `CHAINSNIFFER_CARD_STYLE`. The
+`block` style, the default, sets the details in an aligned monospace block and gives every card the
+same width. The `fields` style shows them as Discord inline fields instead, the layout chainsniffer
+used before the block; its cards are as wide as their content. Both share the title, thumbnail,
+color, footer and timestamp:
 
 - **Title:** `<victim ship> — <victim name | corp name>`, linked to the kill on zKillboard.
 - **Thumbnail:** a render of the victim's ship.
-- **Details:** one monospace code block in the description, a row per detail with the labels in
+- **Details (`block`):** one monospace code block in the description, a row per detail with the labels in
   an aligned column: System, Value (`1.2B ISK`), Attackers, Victim and Final blow (`Pilot (Ship)`).
   The victim's and the final blow's corporation (`[TICKER] Corp`) and alliance (`<ALLY> Alliance`)
   each get a line of their own under the value. A row the killmail does not carry is left out, and
   a value too long for the 40-column block wraps onto an indented continuation line. Names appear
   literally; a backtick in one is shown as the look-alike `ˋ` so it cannot break the block.
-- **Width:** an invisible line of U+2800 (braille blank) characters under the block makes every
+- **Details (`fields`):** inline fields System, Value, Attackers, Victim
+  (`[TICKER] Corp / <ALLY> Alliance`) and Final blow (`Pilot (Ship)` over that affiliation), each
+  left out when the killmail does not carry it. Markdown characters in a chain alias are escaped.
+- **Width (`block`):** an invisible line of U+2800 (braille blank) characters under the block makes every
   card nearly as wide as Discord allows on desktop (37 blanks beside a ship thumbnail, 46
   without), so cards stack at one width whatever their content.
 - **Color and footer:** red `Loss` for a friendly victim, green `Kill` for a friendly final blow,
   and grey with no footer for a neutral in-chain kill.
 - **Timestamp:** the kill time Wanderer reported.
 
-The details block of a kill card reads:
+The details block of a `block` kill card reads:
 
 ```
 System     J134349 (HOTEL)
@@ -45,7 +52,7 @@ Final blow Pilot B (Loki)
 
 System names are resolved through the public ESI endpoint and cached in memory; a lookup that fails
 falls back to the solar system ID. When the system has a temporary name on the Wanderer map (its
-chain alias), the System row shows it after the name, e.g. `J134349 (HOTEL)`; a system with no
+chain alias), the System row or field shows it after the name, e.g. `J134349 (HOTEL)`; a system with no
 temporary name shows the name alone.
 
 ## Setup
@@ -145,6 +152,7 @@ stream connects exits 1, home system or not, as it does for the stream.
 | `CHAINSNIFFER_STATE_DIR` | `/var/lib/chainsniffer` | Directory holding `state.json`. Must be writable. |
 | `CHAINSNIFFER_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 | `CHAINSNIFFER_LOG_FORMAT` | `text` | `text` or `json`. |
+| `CHAINSNIFFER_CARD_STYLE` | `block` | Kill card layout: `block` (aligned monospace details, uniform width) or `fields` (inline fields, the older layout). Case-insensitive. |
 
 ### Secrets from files
 

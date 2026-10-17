@@ -110,6 +110,7 @@ type Relay struct {
 	store    Store
 	topology Topology
 	aliases  Aliases
+	style    discord.CardStyle
 
 	friendlies killmail.Friendlies
 	filters    killmail.Filters
@@ -120,6 +121,7 @@ type Relay struct {
 type options struct {
 	topology   Topology
 	aliases    Aliases
+	style      discord.CardStyle
 	friendlies killmail.Friendlies
 	filters    killmail.Filters
 	logger     *slog.Logger
@@ -151,6 +153,12 @@ func WithTopology(t Topology) Option {
 // up. Without one, or with a nil one, no embed shows an alias.
 func WithAliases(a Aliases) Option {
 	return func(o *options) { o.aliases = a }
+}
+
+// WithCardStyle sets the layout every kill card is rendered in. Without it,
+// cards use [discord.CardStyleBlock].
+func WithCardStyle(s discord.CardStyle) Option {
+	return func(o *options) { o.style = s }
 }
 
 // WithLogger sets the logger the pipeline reports on. A nil logger keeps
@@ -185,7 +193,7 @@ func New(poster Poster, resolver Resolver, store Store, opts ...Option) (*Relay,
 		return nil, errors.New("relay: a state store is required")
 	}
 
-	o := options{logger: slog.Default(), fatalPost: IsFatalPost}
+	o := options{style: discord.CardStyleBlock, logger: slog.Default(), fatalPost: IsFatalPost}
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -196,6 +204,7 @@ func New(poster Poster, resolver Resolver, store Store, opts ...Option) (*Relay,
 		store:      store,
 		topology:   o.topology,
 		aliases:    o.aliases,
+		style:      o.style,
 		friendlies: o.friendlies,
 		filters:    o.filters,
 		logger:     o.logger,
@@ -263,7 +272,7 @@ func (r *Relay) handle(ctx context.Context, k killmail.Killmail) error {
 
 	name := r.resolver.Name(ctx, k.SolarSystemID)
 	alias := r.alias(k.SolarSystemID)
-	if err := r.poster.Post(ctx, discord.Render(k, class, name, alias, discord.CardStyleBlock)); err != nil {
+	if err := r.poster.Post(ctx, discord.Render(k, class, name, alias, r.style)); err != nil {
 		switch {
 		case ctx.Err() != nil:
 			// A post torn down by shutdown is not a post Discord refused, and

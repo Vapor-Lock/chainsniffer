@@ -726,3 +726,34 @@ func TestHandleRendersTheNameAloneWithoutAnAlias(t *testing.T) {
 		})
 	}
 }
+
+// "Card style configuration": the relay posts every card in the style it is
+// given, and in the block style without one.
+func TestHandleRendersTheCardStyle(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		opts       []Option
+		wantFields bool
+	}{
+		{"default", nil, false},
+		{"block", []Option{WithCardStyle(discord.CardStyleBlock)}, false},
+		{"fields", []Option{WithCardStyle(discord.CardStyleFields)}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, tc.opts...)
+
+			f.handle(t, envelope(t, "01JB", kill(1)))
+
+			embed := f.poster.embeds[0]
+			if tc.wantFields {
+				if embed.Description != "" || len(embed.Fields) == 0 {
+					t.Errorf("fields card: description %q, %d fields; want no description and fields", embed.Description, len(embed.Fields))
+				}
+				return
+			}
+			if embed.Description == "" || len(embed.Fields) != 0 {
+				t.Errorf("block card: description %q, %d fields; want a description and no fields", embed.Description, len(embed.Fields))
+			}
+		})
+	}
+}
