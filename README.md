@@ -17,15 +17,34 @@ Each killmail becomes an embed:
 
 - **Title:** `<victim ship> — <victim name | corp name>`, linked to the kill on zKillboard.
 - **Thumbnail:** a render of the victim's ship.
-- **Fields:** System, Value (`1.2B ISK`), Attackers, Victim (`[TICKER] Corp` / `<ALLY>`) and
-  Final blow (`Pilot (Ship) [TICKER]`).
+- **Details:** one monospace code block in the description, a row per detail with the labels in
+  an aligned column: System, Value (`1.2B ISK`), Attackers, Victim and Final blow (`Pilot (Ship)`).
+  The victim's and the final blow's corporation (`[TICKER] Corp`) and alliance (`<ALLY> Alliance`)
+  each get a line of their own under the value. A row the killmail does not carry is left out, and
+  a value too long for the 40-column block wraps onto an indented continuation line. Names appear
+  literally; a backtick in one is shown as the look-alike `ˋ` so it cannot break the block.
+- **Width:** an invisible line of U+2800 (braille blank) characters under the block makes every
+  card as wide as Discord allows on desktop, so cards stack at one width whatever their content.
 - **Color and footer:** red `Loss` for a friendly victim, green `Kill` for a friendly final blow,
   and grey with no footer for a neutral in-chain kill.
 - **Timestamp:** the kill time Wanderer reported.
 
+The details block of a kill card reads:
+
+```
+System     J134349 (HOTEL)
+Value      412.5M ISK
+Attackers  7
+Victim     [CORP] Victim Corporation
+           <VCTM> Victim Alliance
+Final blow Pilot B (Loki)
+           [FRND] Friendly Corporation
+           <BLUE> Friendly Alliance
+```
+
 System names are resolved through the public ESI endpoint and cached in memory; a lookup that fails
 falls back to the solar system ID. When the system has a temporary name on the Wanderer map (its
-chain alias), the System field shows it after the name, e.g. `J134349 (HOTEL)`; a system with no
+chain alias), the System row shows it after the name, e.g. `J134349 (HOTEL)`; a system with no
 temporary name shows the name alone.
 
 ## Setup
@@ -110,7 +129,7 @@ linked. Leave `CHAINSNIFFER_HOME_SYSTEM_ID` unset to relay kills from every syst
 The relay always loads the map's systems, connections and temporary names from
 `/api/maps/{map}/systems` (with the same token) every time the stream connects and again every
 resync interval, and follows the stream's connection, system deletion and system metadata events in
-between; the temporary names are the chain aliases shown in the System field. The home system
+between; the temporary names are the chain aliases shown in the System row. The home system
 only decides whether the linked-system filter applies, so a deployment without one needs that
 endpoint too. Every load logs one info line, `loaded map topology`, with the number of `systems` on
 the map and, with a home system set, how many are `linked_systems`: if that says 1, the home system
@@ -259,7 +278,7 @@ nix run .     # with the variables already in the environment
   and an event broadcast while the stream is reconnecting can be lost; the next periodic reload
   (`CHAINSNIFFER_TOPOLOGY_RESYNC_INTERVAL`) corrects any of these. A reload that fails logs a
   warning and keeps the current topology and aliases.
-- **Posts are never edited.** The alias in the System field is the one known when the kill is
+- **Posts are never edited.** The alias in the System row is the one known when the kill is
   posted. A system named or renamed afterwards shows its new alias on later kills only.
 - **The bot only writes.** No slash commands, no reading messages, and no map events other than
   kills, connection changes, system deletions and system metadata changes.
