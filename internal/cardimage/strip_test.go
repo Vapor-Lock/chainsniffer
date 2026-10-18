@@ -133,13 +133,25 @@ func TestStripGolden(t *testing.T) {
 			b := gotImg.Bounds()
 			for y := b.Min.Y; y < b.Max.Y; y++ {
 				for x := b.Min.X; x < b.Max.X; x++ {
-					if g, w := color.RGBAModel.Convert(gotImg.At(x, y)), color.RGBAModel.Convert(wantImg.At(x, y)); g != w {
+					if g, w := color.RGBAModel.Convert(gotImg.At(x, y)).(color.RGBA), color.RGBAModel.Convert(wantImg.At(x, y)).(color.RGBA); !closeRGBA(g, w) {
 						t.Fatalf("strip differs from %s at (%d, %d): got %v, want %v", tc.golden, x, y, g, w)
 					}
 				}
 			}
 		})
 	}
+}
+
+// pixelTolerance is how far a channel may stray from the golden strip. Text is
+// antialiased in floating point, and arm64 rounds some of it one level
+// differently from amd64 (it fuses multiplies and adds), so the goldens
+// generated on amd64 are off by one on arm64. A real layout change moves
+// pixels by far more than this.
+const pixelTolerance = 2
+
+func closeRGBA(a, b color.RGBA) bool {
+	near := func(x, y uint8) bool { return max(x, y)-min(x, y) <= pixelTolerance }
+	return near(a.R, b.R) && near(a.G, b.G) && near(a.B, b.B) && near(a.A, b.A)
 }
 
 func decode(t *testing.T, b []byte) image.Image {

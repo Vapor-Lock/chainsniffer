@@ -14,8 +14,18 @@ concurrency:
 
 jobs:
   check:
-    name: nix flake check
-    runs-on: ubuntu-24.04
+    name: nix flake check (${{ matrix.arch }})
+    # Both architectures the release publishes, so an arm64-only failure shows up on the pull
+    # request rather than in the release.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

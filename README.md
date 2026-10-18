@@ -226,7 +226,7 @@ runs as uid `65532` and declares a volume at `/var/lib/chainsniffer` owned by th
 mounted volume is writable without any further setup. It carries the standard OCI labels:
 `org.opencontainers.image.source` (the GitHub repository), `.version`, `.revision` (the commit it
 was built from), `.description` and `.licenses` (`MIT`), so
-`docker inspect --format '{{json .Config.Labels}}' ghcr.io/vapor-lock/chainsniffer:0.2.0` tells you
+`docker inspect --format '{{json .Config.Labels}}' ghcr.io/vapor-lock/chainsniffer:0.2.1` tells you
 what you are running.
 
 ```sh
@@ -238,14 +238,14 @@ docker run -d --name chainsniffer --restart unless-stopped \
   -e CHAINSNIFFER_DISCORD_TOKEN=... \
   -e CHAINSNIFFER_DISCORD_CHANNEL_ID=123456789012345678 \
   -e CHAINSNIFFER_FRIENDLY_CORP_IDS=98000001,98000002 \
-  ghcr.io/vapor-lock/chainsniffer:0.2.0
+  ghcr.io/vapor-lock/chainsniffer:0.2.1
 ```
 
 Run it without the state volume and it still works, but a restart re-posts whatever Wanderer
 replays. Run it with no environment at all and it exits 2, naming every variable it needs:
 
 ```console
-$ docker run --rm ghcr.io/vapor-lock/chainsniffer:0.2.0
+$ docker run --rm ghcr.io/vapor-lock/chainsniffer:0.2.1
 chainsniffer: invalid configuration: CHAINSNIFFER_WANDERER_URL is required; ...
 ```
 
@@ -298,7 +298,7 @@ with its paths made relative to the Wanderer directory:
 ```yaml
 services:
   chainsniffer:
-    image: ghcr.io/vapor-lock/chainsniffer:0.2.0
+    image: ghcr.io/vapor-lock/chainsniffer:0.2.1
     restart: unless-stopped
     stop_grace_period: 15s      # longer than the relay's ten-second shutdown
     env_file: chainsniffer/chainsniffer.env
@@ -367,8 +367,8 @@ nix build .#image
 docker load < result
 ```
 
-That loads `chainsniffer:0.2.0`, the same image a release publishes. To run it from the compose
-snippet, set `image: chainsniffer:0.2.0` and `pull_policy: never` on the service, so Compose does
+That loads `chainsniffer:0.2.1`, the same image a release publishes. To run it from the compose
+snippet, set `image: chainsniffer:0.2.1` and `pull_policy: never` on the service, so Compose does
 not look for it in a registry.
 
 ### The binary

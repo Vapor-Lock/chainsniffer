@@ -14,7 +14,7 @@
 
 services:
   chainsniffer:
-    image: ghcr.io/vapor-lock/chainsniffer:0.2.0
+    image: ghcr.io/vapor-lock/chainsniffer:0.2.1
     restart: unless-stopped
     stop_grace_period: 15s      # longer than the relay's ten-second shutdown
     env_file: chainsniffer.env
