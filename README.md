@@ -216,14 +216,18 @@ Neither token is ever logged: the startup summary and every error report them as
 
 ### The container image
 
-```sh
-nix build .#image
-docker load < result
-```
+Each release publishes a multi-arch image (`linux/amd64` and `linux/arm64`) to the GitHub
+Container Registry as `ghcr.io/vapor-lock/chainsniffer`, tagged `X.Y.Z`, `X.Y` and `latest`. Pin
+the full version: before 1.0 a minor release may change defaults, and [`CHANGELOG.md`](CHANGELOG.md)
+says what to change when it does.
 
-That loads `chainsniffer:0.1.0`: the binary, a CA bundle, and nothing else — no shell and no
-package manager. It runs as uid `65532` and declares a volume at `/var/lib/chainsniffer` owned by
-that user, so a mounted volume is writable without any further setup.
+The image holds the binary, a CA bundle, and nothing else — no shell and no package manager. It
+runs as uid `65532` and declares a volume at `/var/lib/chainsniffer` owned by that user, so a
+mounted volume is writable without any further setup. It carries the standard OCI labels:
+`org.opencontainers.image.source` (the GitHub repository), `.version`, `.revision` (the commit it
+was built from), `.description` and `.licenses` (`MIT`), so
+`docker inspect --format '{{json .Config.Labels}}' ghcr.io/vapor-lock/chainsniffer:0.2.0` tells you
+what you are running.
 
 ```sh
 docker run -d --name chainsniffer --restart unless-stopped \
@@ -234,14 +238,14 @@ docker run -d --name chainsniffer --restart unless-stopped \
   -e CHAINSNIFFER_DISCORD_TOKEN=... \
   -e CHAINSNIFFER_DISCORD_CHANNEL_ID=123456789012345678 \
   -e CHAINSNIFFER_FRIENDLY_CORP_IDS=98000001,98000002 \
-  chainsniffer:0.1.0
+  ghcr.io/vapor-lock/chainsniffer:0.2.0
 ```
 
 Run it without the state volume and it still works, but a restart re-posts whatever Wanderer
 replays. Run it with no environment at all and it exits 2, naming every variable it needs:
 
 ```console
-$ docker run --rm chainsniffer:0.1.0
+$ docker run --rm ghcr.io/vapor-lock/chainsniffer:0.2.0
 chainsniffer: invalid configuration: CHAINSNIFFER_WANDERER_URL is required; ...
 ```
 
@@ -250,53 +254,122 @@ exits 0.
 
 ### Docker Compose
 
-To run it next to other services, merge these keys into the existing `docker-compose.yml`, at the
-top level next to `services:`. The tokens arrive as Compose secrets and are read through the
-`_FILE` variables, so they stay out of `docker inspect` and the compose file itself:
+[`deploy/`](deploy/) holds a service definition for an existing Wanderer compose project:
+[`compose.yaml`](deploy/compose.yaml), which you don't edit, and
+[`chainsniffer.env.example`](deploy/chainsniffer.env.example), the template for your settings.
+The tokens arrive as Compose secrets and are read through the `_FILE` variables, so they stay out
+of `docker inspect` and the compose file itself. Copy the directory next to Wanderer's
+`docker-compose.yml` and fill it in:
+
+```sh
+cp -r deploy /path/to/wanderer/chainsniffer
+cd /path/to/wanderer
+cp chainsniffer/chainsniffer.env.example chainsniffer/chainsniffer.env
+$EDITOR chainsniffer/chainsniffer.env
+mkdir chainsniffer/secrets
+printf '%s' '<map API key>' > chainsniffer/secrets/wanderer.key
+printf '%s' '<bot token>' > chainsniffer/secrets/discord.token
+chmod 0644 chainsniffer/secrets/*
+```
+
+With Compose v2.20 or later, add one line to Wanderer's `docker-compose.yml`, at the top level
+next to `services:`, and start it:
+
+```yaml
+include:
+  - chainsniffer/compose.yaml
+```
+
+```sh
+docker compose up -d chainsniffer
+docker compose logs -f chainsniffer
+```
+
+The included service joins the Wanderer project's default network, so the env file's default
+`CHAINSNIFFER_WANDERER_URL=http://wanderer:8000` reaches Wanderer without going through the
+reverse proxy, whose idle timeouts and buffering are the usual cause of a stalled stream. That
+default assumes the Wanderer service is named `wanderer` and listens on Wanderer's default port,
+`8000`; change it to match your file, or to the public `https://` URL when chainsniffer runs on
+another host. A wrong address is logged and retried, not fatal.
+
+On an older Compose, merge this block into `docker-compose.yml` instead. It is `deploy/compose.yaml`
+with its paths made relative to the Wanderer directory:
 
 ```yaml
 services:
   chainsniffer:
-    image: chainsniffer:0.1.0
-    pull_policy: never          # loaded with `docker load`, not pulled from a registry
+    image: ghcr.io/vapor-lock/chainsniffer:0.2.0
     restart: unless-stopped
-    stop_grace_period: 15s      # room for the ten-second shutdown described above
+    stop_grace_period: 15s      # longer than the relay's ten-second shutdown
+    env_file: chainsniffer/chainsniffer.env
     environment:
-      CHAINSNIFFER_WANDERER_URL: https://wanderer.example.com
-      CHAINSNIFFER_WANDERER_MAP: my-chain
       CHAINSNIFFER_WANDERER_TOKEN_FILE: /run/secrets/chainsniffer_wanderer_token
       CHAINSNIFFER_DISCORD_TOKEN_FILE: /run/secrets/chainsniffer_discord_token
-      CHAINSNIFFER_DISCORD_CHANNEL_ID: "123456789012345678"
-      CHAINSNIFFER_FRIENDLY_ALLIANCE_IDS: "99000001"
-      CHAINSNIFFER_HOME_SYSTEM_ID: "31000727"
-      CHAINSNIFFER_LOG_FORMAT: json
     secrets:
       - chainsniffer_wanderer_token
       - chainsniffer_discord_token
     volumes:
       - chainsniffer-state:/var/lib/chainsniffer
+    read_only: true             # the relay writes only to its state volume
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
 volumes:
   chainsniffer-state:
 
 secrets:
   chainsniffer_wanderer_token:
-    file: ./secrets/wanderer.key
+    file: ./chainsniffer/secrets/wanderer.key
   chainsniffer_discord_token:
-    file: ./secrets/discord.token
+    file: ./chainsniffer/secrets/discord.token
 ```
 
 - **Secrets:** Compose mounts each secret file with its permissions on the host. The container
-  runs as uid `65532`, so the files must be readable by that uid; mode `0644`, or ownership by
-  `65532`, works.
+  runs as uid `65532`, so the files must be readable by that uid; mode `0644`, as above, or
+  ownership by `65532` with mode `0400`, works. `chainsniffer.env` holds no secret.
+- **Hardening:** the root filesystem is read-only, every capability is dropped and privilege
+  escalation is off. The relay writes only to its state volume, temp files included, so it needs
+  nothing more. Logs rotate at three files of 10 MB.
 - **State volume:** Compose creates the named volume on the first `docker compose up`, owned by the
   image's user. Never point two services, or two compose projects, at the same map: each would
   post every kill, so the channel would get each kill twice.
-- **Numbers:** quote IDs in `environment:`, as above, so YAML does not read them as numbers.
+- **Env file:** values are taken literally, so don't quote them. The template lists every
+  setting with its default; uncomment the ones you change.
 - **Health check:** the image has no shell, so there is nothing for a `healthcheck:` to run. Rely
   on `restart:` and the exit statuses below.
-- **Commands:** `docker compose up -d chainsniffer` starts it, and `docker compose logs -f
-  chainsniffer` follows its log.
+- **No `depends_on`:** a relay that starts before Wanderer retries the connection with backoff, and
+  a hard dependency would break for a Wanderer service under another name.
+
+### Upgrading
+
+Read the release's entry in [`CHANGELOG.md`](CHANGELOG.md), apply its **Upgrading** notes to
+`chainsniffer.env`, change the tag in `image:`, and recreate the service:
+
+```sh
+docker compose pull chainsniffer
+docker compose up -d chainsniffer
+```
+
+The state volume carries over, so the relay resumes from its saved cursor and does not re-post
+kills it already posted. To roll back, put the previous tag back. A deployment that loaded the
+image with `docker load` and set `pull_policy: never` switches `image:` to the GHCR reference and
+drops `pull_policy`; its state volume carries over the same way.
+
+### Building the image yourself
+
+```sh
+nix build .#image
+docker load < result
+```
+
+That loads `chainsniffer:0.2.0`, the same image a release publishes. To run it from the compose
+snippet, set `image: chainsniffer:0.2.0` and `pull_policy: never` on the service, so Compose does
+not look for it in a registry.
 
 ### The binary
 
@@ -373,6 +446,9 @@ nix build .#image  # the OCI image
 Every test runs offline against `httptest` servers, so `nix flake check` works in the Nix sandbox.
 Note that **Nix only sees files git tracks**: `git add` a new file before building or checking.
 
+CI runs `nix flake check` on every pull request and every push to `main`. Releases are cut by
+pushing a `vX.Y.Z` tag; [`RELEASING.md`](RELEASING.md) has the procedure.
+
 ### Updating `vendorHash`
 
 `packages.default` is a `buildGoModule` with a pinned `vendorHash`, which covers the vendored
@@ -403,3 +479,7 @@ hash mismatch. To update it:
 
 The specs this was built from live in `openspec/changes/archive/2026-10-14-add-killmail-relay-bot/`;
 `design.md` there documents the Wanderer wire format and the decisions behind the layout.
+
+## License
+
+MIT; see [`LICENSE`](LICENSE).

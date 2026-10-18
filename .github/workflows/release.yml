@@ -1,0 +1,156 @@
+name: Release
+
+# Pushing vX.Y.Z publishes release X.Y.Z: the image nix builds, for amd64 and arm64, as one
+# multi-platform image on GHCR, and a GitHub Release with the version's CHANGELOG.md entry.
+# Nothing is published unless the tag matches the flake version, the changelog has an entry and
+# the merge gate passes on the tagged commit. See RELEASING.md.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/vapor-lock/chainsniffer
+
+jobs:
+  verify:
+    name: Verify tag, changelog and gate
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+      - name: Check the tag matches the flake version
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(.github/scripts/check-release-version.sh "$TAG")
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          if [[ $version == *-* ]]; then prerelease=true; else prerelease=false; fi
+          echo "prerelease=$prerelease" >>"$GITHUB_OUTPUT"
+      - name: Extract the changelog entry
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: .github/scripts/release-notes.sh "$VERSION" >notes.md
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: notes.md
+          if-no-files-found: error
+      - run: nix flake check -L
+
+  image:
+    name: Image (${{ matrix.arch }})
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+      - run: nix build -L .#image
+      - name: Push ${{ env.IMAGE }}:${{ needs.verify.outputs.version }}-${{ matrix.arch }}
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # skopeo comes from the flake's pinned nixpkgs, so both runners use the same one.
+        run: |
+          nix shell --inputs-from . nixpkgs#skopeo --command \
+            skopeo copy --dest-creds "$GITHUB_ACTOR:$GITHUB_TOKEN" \
+            docker-archive:result "docker://$IMAGE:$VERSION-$ARCH"
+
+  publish:
+    name: Publish multi-arch image and GitHub Release
+    needs: [verify, image]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      # The moving tags are written only here, after both platforms are pushed. A pre-release
+      # gets its full version only.
+      - name: Create the multi-arch image
+        run: |
+          tags=(--tag "$IMAGE:$VERSION")
+          if [[ $PRERELEASE != true ]]; then
+            tags+=(--tag "$IMAGE:${VERSION%.*}" --tag "$IMAGE:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" \
+            "$IMAGE:$VERSION-amd64" "$IMAGE:$VERSION-arm64"
+      - run: docker logout ghcr.io
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          {
+            echo
+            echo "---"
+            echo
+            echo "Image: \`$IMAGE:$VERSION\` (linux/amd64, linux/arm64)"
+            echo
+            echo '```sh'
+            echo "docker pull $IMAGE:$VERSION"
+            echo '```'
+          } >>notes.md
+          # A re-run of this job leaves an already created release alone.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG already exists"
+            exit 0
+          fi
+          flags=()
+          if [[ $PRERELEASE == true ]]; then flags+=(--prerelease); fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$TAG" --notes-file notes.md "${flags[@]}"
+      # Fails while the GHCR package is still private (see RELEASING.md), so a release users
+      # cannot pull never looks successful.
+      - name: Check the image is public and has both platforms
+        run: |
+          DOCKER_CONFIG=$(mktemp -d)
+          export DOCKER_CONFIG
+          manifest=$(docker manifest inspect "$IMAGE:$VERSION")
+          for platform in linux/amd64 linux/arm64; do
+            if ! jq -e --arg p "$platform" \
+              '[.manifests[] | "\(.platform.os)/\(.platform.architecture)"] | index($p)' \
+              <<<"$manifest" >/dev/null; then
+              echo "$IMAGE:$VERSION has no $platform image" >&2
+              echo "$manifest" >&2
+              exit 1
+            fi
+          done
+          echo "$IMAGE:$VERSION is public with linux/amd64 and linux/arm64"
