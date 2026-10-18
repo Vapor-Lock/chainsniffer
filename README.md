@@ -446,6 +446,9 @@ nix build .#image  # the OCI image
 Every test runs offline against `httptest` servers, so `nix flake check` works in the Nix sandbox.
 Note that **Nix only sees files git tracks**: `git add` a new file before building or checking.
 
+CI runs `nix flake check` on every pull request and every push to `main`. Releases are cut by
+pushing a `vX.Y.Z` tag; [`RELEASING.md`](RELEASING.md) has the procedure.
+
 ### Updating `vendorHash`
 
 `packages.default` is a `buildGoModule` with a pinned `vendorHash`, which covers the vendored
