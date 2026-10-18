@@ -226,7 +226,7 @@ package manager. It runs as uid `65532` and declares a volume at `/var/lib/chain
 that user, so a mounted volume is writable without any further setup. It carries the standard OCI
 labels: `org.opencontainers.image.source` (the GitHub repository), `.version`, `.revision` (the
 commit it was built from), `.description` and `.licenses` (`MIT`), so
-`docker inspect --format '{{json .Config.Labels}}' chainsniffer:0.1.0` tells you what you are running.
+`docker inspect --format '{{json .Config.Labels}}' chainsniffer:0.2.0` tells you what you are running.
 
 ```sh
 docker run -d --name chainsniffer --restart unless-stopped \
