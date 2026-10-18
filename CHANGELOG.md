@@ -5,9 +5,10 @@ All notable changes to chainsniffer are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor release may change
 defaults: read its **Upgrading** section before moving to it.
 
-## [0.2.0] - 2026-10-17
+## [0.2.1] - 2026-10-18
 
-The first release published as an image, `ghcr.io/vapor-lock/chainsniffer:0.2.0`.
+The first release published as an image, `ghcr.io/vapor-lock/chainsniffer:0.2.1`. It carries
+everything listed for 0.2.0, which was tagged but never published.
 
 ### Upgrading
 
@@ -46,6 +47,13 @@ The first release published as an image, `ghcr.io/vapor-lock/chainsniffer:0.2.0`
 
 - Kill cards no longer lose the victim's and final blow's corporation and alliance when Wanderer
   sends their IDs without names.
+- The arm64 image builds: the strip image's golden test tolerates the one-level antialiasing
+  differences arm64 produces when rendering text, and CI now runs on arm64 as well as amd64.
+
+## [0.2.0] - 2026-10-17
+
+Tagged as `v0.2.0`, but never published: its release failed on the arm64 build. Its changes ship
+in 0.2.1, listed above.
 
 ## [0.1.0] - 2026-10-16
 
@@ -62,5 +70,6 @@ Tagged as `v0.1.0`, but never published as an image. Build it from the tag with
 - Chain aliases: the System line shows each wormhole's temporary name from the map.
 - A container image built with Nix, running as a non-root user with a state volume.
 
-[0.2.0]: https://github.com/Vapor-Lock/chainsniffer/compare/v0.1.0...v0.2.0
+[0.2.1]: https://github.com/Vapor-Lock/chainsniffer/compare/v0.1.0...v0.2.1
+[0.2.0]: https://github.com/Vapor-Lock/chainsniffer/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Vapor-Lock/chainsniffer/releases/tag/v0.1.0
