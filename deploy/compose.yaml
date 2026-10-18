@@ -1,0 +1,45 @@
+# chainsniffer as a service in an existing Wanderer compose project.
+#
+# Copy this directory next to the Wanderer docker-compose.yml as chainsniffer/, then:
+#   cp chainsniffer/chainsniffer.env.example chainsniffer/chainsniffer.env   # and edit it
+#   put the map API key in chainsniffer/secrets/wanderer.key
+#   put the Discord bot token in chainsniffer/secrets/discord.token
+#   add `include: [chainsniffer/compose.yaml]` to the Wanderer docker-compose.yml (Compose v2.20+)
+#   docker compose up -d chainsniffer
+#
+# The service joins the including project's default network, so the env file's default
+# CHAINSNIFFER_WANDERER_URL=http://wanderer:8000 reaches Wanderer without leaving the host. Paths
+# below are relative to this file. Upgrade by changing the image tag and running
+# `docker compose up -d chainsniffer`; the state volume carries over.
+
+services:
+  chainsniffer:
+    image: ghcr.io/vapor-lock/chainsniffer:0.2.0
+    restart: unless-stopped
+    stop_grace_period: 15s      # longer than the relay's ten-second shutdown
+    env_file: chainsniffer.env
+    environment:
+      CHAINSNIFFER_WANDERER_TOKEN_FILE: /run/secrets/chainsniffer_wanderer_token
+      CHAINSNIFFER_DISCORD_TOKEN_FILE: /run/secrets/chainsniffer_discord_token
+    secrets:
+      - chainsniffer_wanderer_token
+      - chainsniffer_discord_token
+    volumes:
+      - chainsniffer-state:/var/lib/chainsniffer
+    read_only: true             # the relay writes only to its state volume
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  chainsniffer-state:
+
+secrets:
+  chainsniffer_wanderer_token:
+    file: ./secrets/wanderer.key
+  chainsniffer_discord_token:
+    file: ./secrets/discord.token

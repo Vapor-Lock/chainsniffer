@@ -14,3 +14,7 @@
 
 # devflake: agent worktrees, direnv, nix build results, the beads export
 .beads/issues.jsonl
+
+# deploy/: the operator's settings and secrets
+/deploy/chainsniffer.env
+/deploy/secrets/
